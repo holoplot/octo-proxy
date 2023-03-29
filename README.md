@@ -11,6 +11,7 @@ Octo-proxy or `octo` is simple TCP & TLS Proxy with mutual authentication and tr
 - Support for multiple targets, accessed in random order (load balancer)
 - Reload configuration or certificate without dropping connection
 - Expose metrics that can be consumed by prometheus
+- Optional mDNS service discovery (Linux only)
 
 ### Usage
 #### Run octo with ad-hoc command
@@ -87,6 +88,20 @@ servers:
   mirror:
     host: 172.16.0.1
     port: 80
+```
+
+#### Run Octo as mDNS service discovery proxy
+``` yaml
+// config.yaml
+servers:
+- name: web-proxy
+  listener:
+    host: 0.0.0.0
+    port: 8080
+  mdnsTarget:
+    serviceName: _http._tcp
+    enableV4: true
+    enableV6: true
 ```
 
 ```

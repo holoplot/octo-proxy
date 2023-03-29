@@ -68,6 +68,7 @@ func (p *Proxy) Run(c config.ServerConfig) {
 		Str("name", c.Name).
 		Str("host", c.Listener.Host).
 		Str("port", c.Listener.Port).
+		Str("mdnsServiceTarget", c.MDNSTarget.ServiceName).
 		Strs("targets", ts).
 		Msg("running server")
 

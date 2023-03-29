@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/nothinux/octo-proxy/pkg/config"
+	"github.com/nothinux/octo-proxy/pkg/mdns"
 	"github.com/nothinux/octo-proxy/pkg/metrics"
 	"github.com/nothinux/octo-proxy/pkg/proxy"
 	"github.com/okzk/sdnotify"
@@ -90,6 +91,8 @@ func reloadProxy(cPath string, octo *Octo) error {
 		MetricsConfig: c.MetricsConfig,
 	}
 
+	mdns.UntrackServices()
+
 	proxies := ss.runProxy()
 
 	octo.Lock()
@@ -112,6 +115,8 @@ func (s *Server) runProxy() map[string]*proxy.Proxy {
 
 	for _, serverConfig := range s.ServerConfigs {
 		sc := serverConfig
+
+		trackMDNSServices(sc)
 
 		//
 		proxy := proxy.New(sc.Name)
@@ -152,6 +157,17 @@ func shutdown(proxies map[string]*proxy.Proxy, m *metrics.Metrics) {
 	if m != nil {
 		if err := m.Shutdown(context.Background()); err != nil {
 			log.Error().Err(err).Msg("shutdown failed")
+		}
+	}
+}
+
+func trackMDNSServices(c config.ServerConfig) {
+	if c.MDNSTarget.ServiceName != "" {
+		if err := mdns.TrackService(c.MDNSTarget.ServiceName); err != nil {
+			log.Error().
+				Err(err).
+				Str("service", c.MDNSTarget.ServiceName).
+				Msg("failed to track mDNS service")
 		}
 	}
 }

@@ -528,6 +528,25 @@ func TestValidateConfig(t *testing.T) {
 			expectedError:  "port in servers.[0].target.port is not valid port number",
 		},
 		{
+			Name: "invalid mDNS service name",
+			Config: &Config{
+				ServerConfigs: []ServerConfig{
+					{
+						Name: "proxy-1",
+						Listener: HostConfig{
+							Host: "127.0.0.1",
+							Port: "8080",
+						},
+						MDNSTarget: MDNSTargetConfig{
+							ServiceName: "test",
+						},
+					},
+				},
+			},
+			expectedConfig: nil,
+			expectedError:  "invalid mDNS service name servers.[0].mdnsServiceTarget.serviceName: test",
+		},
+		{
 			Name: "no host in mirror",
 			Config: &Config{
 				ServerConfigs: []ServerConfig{

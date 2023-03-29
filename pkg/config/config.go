@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nothinux/octo-proxy/pkg/errors"
+	"github.com/rs/zerolog/log"
 
 	"gopkg.in/yaml.v2"
 )
@@ -29,15 +30,24 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Name     string       `yaml:"name"`
-	Listener HostConfig   `yaml:"listener"`
-	Targets  []HostConfig `yaml:"targets"`
-	Mirror   HostConfig   `yaml:"mirror"`
+	Name       string           `yaml:"name"`
+	Listener   HostConfig       `yaml:"listener"`
+	Targets    []HostConfig     `yaml:"targets"`
+	MDNSTarget MDNSTargetConfig `yaml:"mdnsTarget"`
+	Mirror     HostConfig       `yaml:"mirror"`
 }
 
 type HostConfig struct {
 	Host             string `yaml:"host"`
 	Port             string `yaml:"port"`
+	ConnectionConfig `yaml:"connection"`
+	TLSConfig        `yaml:"tls"`
+}
+
+type MDNSTargetConfig struct {
+	ServiceName      string `yaml:"serviceName"`
+	IPv4             bool   `yaml:"ipv4"`
+	IPv6             bool   `yaml:"ipv6"`
 	ConnectionConfig `yaml:"connection"`
 	TLSConfig        `yaml:"tls"`
 }
@@ -179,7 +189,7 @@ func validateConfig(c *Config) (*Config, error) {
 			return nil, err
 		}
 
-		if len(c.ServerConfigs[i].Targets) == 0 {
+		if len(c.ServerConfigs[i].Targets) == 0 && c.ServerConfigs[i].MDNSTarget.ServiceName == "" {
 			return nil, errors.New("server", fmt.Sprintf("no target configurations in servers.[%d]", i))
 		}
 
@@ -188,11 +198,28 @@ func validateConfig(c *Config) (*Config, error) {
 				return nil, err
 			}
 
-			if err := setTimeout(&c.ServerConfigs[i].Targets[j]); err != nil {
+			if err := setTimeout(&c.ServerConfigs[i].Targets[j].ConnectionConfig); err != nil {
 				return nil, errors.New("server", fmt.Sprintf("failed to parse timeout servers.[%d].targets[%d]: %v", i, j, err))
 			}
 
-			setSAN(&c.ServerConfigs[i].Targets[j])
+			setSAN(&c.ServerConfigs[i].Targets[j].TLSConfig)
+		}
+
+		if c.ServerConfigs[i].MDNSTarget.ServiceName != "" {
+			if !strings.HasPrefix(c.ServerConfigs[i].MDNSTarget.ServiceName, "_") {
+				return nil, errors.New("server", fmt.Sprintf("invalid mDNS service name servers.[%d].mdnsServiceTarget.serviceName: %s",
+					i, c.ServerConfigs[i].MDNSTarget.ServiceName))
+			}
+
+			if !c.ServerConfigs[i].MDNSTarget.IPv4 && !c.ServerConfigs[i].MDNSTarget.IPv6 {
+				return nil, errors.New("server", fmt.Sprintf("invalid mDNS service configuration servers.[%d].mdnsServiceTarget: neither v4 nor v6 is enabled", i))
+			}
+
+			if err := setTimeout(&c.ServerConfigs[i].MDNSTarget.ConnectionConfig); err != nil {
+				return nil, errors.New("server", fmt.Sprintf("failed to parse timeout servers.[%d].mdnsServiceTarget: %v", i, err))
+			}
+
+			setSAN(&c.ServerConfigs[i].MDNSTarget.TLSConfig)
 		}
 
 		// check config for error only when configuration is not nil
@@ -201,22 +228,22 @@ func validateConfig(c *Config) (*Config, error) {
 				return nil, err
 			}
 
-			if err := setTimeout(mirror); err != nil {
+			if err := setTimeout(&mirror.ConnectionConfig); err != nil {
 				return nil, errors.New("server", fmt.Sprintf("failed to parse timeout servers.[%d].mirror: %v", i, err))
 			}
 
-			setSAN(mirror)
+			setSAN(&mirror.TLSConfig)
 		}
 		// set all listener role to server
 		if !reflect.DeepEqual(TLSConfig{}, c.ServerConfigs[i].Listener.TLSConfig) {
 			listener.TLSConfig.Role.Server = true
 		}
 
-		if err := setTimeout(listener); err != nil {
+		if err := setTimeout(&listener.ConnectionConfig); err != nil {
 			return nil, errors.New("server", fmt.Sprintf("failed to parse timeout servers.[%d]: %v", i, err))
 		}
 
-		setSAN(listener)
+		setSAN(&listener.TLSConfig)
 	}
 
 	if !reflect.DeepEqual(HostConfig{}, c.MetricsConfig) {
@@ -240,15 +267,15 @@ type timeoutFormat struct {
 	duration time.Duration
 }
 
-func setTimeout(c *HostConfig) error {
+func setTimeout(c *ConnectionConfig) error {
 	var format []timeoutFormat
 	format = append(format, timeoutFormat{"ms", time.Millisecond})
 	format = append(format, timeoutFormat{"s", time.Second})
 
-	timeout := c.ConnectionConfig.Timeout
+	timeout := c.Timeout
 
 	if timeout == "" {
-		c.ConnectionConfig.TimeoutDuration = time.Duration(300) * time.Second
+		c.TimeoutDuration = time.Duration(300) * time.Second
 		return nil
 	}
 
@@ -266,9 +293,10 @@ func setTimeout(c *HostConfig) error {
 	return setTimeoutDuration(c, timeout, time.Second)
 }
 
-func setTimeoutDuration(c *HostConfig, timeout string, td time.Duration) error {
+func setTimeoutDuration(c *ConnectionConfig, timeout string, td time.Duration) error {
 	t, err := strconv.Atoi(timeout)
 	if err != nil {
+		log.Error().Err(err).Msg("Atoi")
 		return err
 	}
 
@@ -276,14 +304,18 @@ func setTimeoutDuration(c *HostConfig, timeout string, td time.Duration) error {
 		return fmt.Errorf("can't use negative value for timeout")
 	}
 
-	c.ConnectionConfig.TimeoutDuration = time.Duration(t) * td
+	log.Info().
+		Int("seconds", t).
+		Msg("Applying timeout")
+
+	c.TimeoutDuration = time.Duration(t) * td
 
 	return nil
 }
 
-func setSAN(c *HostConfig) {
-	if len(c.TLSConfig.SubjectAltNames) != 0 {
-		c.TLSConfig.SubjectAltName = *parseSubjectAltNames(c.TLSConfig.SubjectAltNames)
+func setSAN(c *TLSConfig) {
+	if len(c.SubjectAltNames) != 0 {
+		c.SubjectAltName = *parseSubjectAltNames(c.SubjectAltNames)
 	}
 }
 

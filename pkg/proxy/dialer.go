@@ -6,10 +6,12 @@ import (
 	"math/rand"
 	"net"
 	"reflect"
+	"strconv"
 	"time"
 
 	"github.com/nothinux/octo-proxy/pkg/config"
 	"github.com/nothinux/octo-proxy/pkg/errors"
+	"github.com/nothinux/octo-proxy/pkg/mdns"
 	"github.com/nothinux/octo-proxy/pkg/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -66,6 +68,31 @@ func dialTargets(hcs []config.HostConfig) (net.Conn, config.HostConfig, error) {
 
 func getTargets(c config.ServerConfig) ([]net.Conn, io.Writer, config.HostConfig, error) {
 	targets := c.Targets
+
+	if c.MDNSTarget.ServiceName != "" {
+		addrs, err := mdns.ResolveService(c.MDNSTarget.ServiceName, c.MDNSTarget.IPv4, c.MDNSTarget.IPv6, time.Second)
+		if err == nil {
+			log.Debug().
+				Interface("addrs", addrs).
+				Msg("mDNS lookup finished")
+
+			for _, addr := range addrs {
+				target := config.HostConfig{
+					Host:             addr.IP.String(),
+					Port:             strconv.Itoa(addr.Port),
+					ConnectionConfig: c.MDNSTarget.ConnectionConfig,
+					TLSConfig:        c.MDNSTarget.TLSConfig,
+				}
+
+				targets = append(targets, target)
+			}
+		} else {
+			log.Warn().
+				Err(err).
+				Str("service", c.MDNSTarget.ServiceName).
+				Msg("failed to lookup mdns service")
+		}
+	}
 
 	rand.Shuffle(len(targets), func(i, j int) {
 		targets[i], targets[j] = targets[j], targets[i]

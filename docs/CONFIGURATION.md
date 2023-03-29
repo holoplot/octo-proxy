@@ -7,12 +7,13 @@
 
 
 ## Server
-| Field    | Type             | Description   | Required |
-| -------- | ---------------- | ------------- | -------- |
-| name     | `<string>`       | Name of proxy | no       |
-| listener | [`Hostconfig`](#hostconfig) | Set of listener related configuration, all of incoming request to octo-proxy will be handled by this listener.            | yes      |
-| targets  | [`Hostconfig[]`](#hostconfig) | Set of target related configurations. These targets are backends which octo-proxy will forward all incoming traffic accepted by the listener.            | yes      |
-| mirror   | [`Hostconfig`](#hostconfig)  | Set of mirror related configuration, if this configuration is set, all incoming request will also forwarded to this mirror, unlike target, in mirror we implement fire & forget, every request will only forwarded, and the response will be ignored.            | no       |
+| Field        | Type             | Description   | Required |
+| ------------ | ---------------- | ------------- | -------- |
+| name         | `<string>`       | Name of proxy | no       |
+| listener     | [`Hostconfig`](#hostconfig) | Set of listener related configuration, all of incoming request to octo-proxy will be handled by this listener.            | yes      |
+| targets      | [`Hostconfig[]`](#hostconfig) | Set of target related configurations. These targets are backends which octo-proxy will forward all incoming traffic accepted by the listener.            | yes      |
+| mdnsTarget   | [`mdnsTargetConfig`](#mdnstargetconfig) | A mDNS service target configuration. If specified, services announced under this name will be resolved and then be used as additional targets on each request.            | no      |
+| mirror       | [`Hostconfig`](#hostconfig)  | Set of mirror related configuration, if this configuration is set, all incoming request will also forwarded to this mirror, unlike target, in mirror we implement fire & forget, every request will only forwarded, and the response will be ignored.            | no       |
 
 ## Hostconfig
 | Field     | Type          | Description                     | Required |
@@ -22,6 +23,16 @@
 | connection   | [`connectionConfig`](#connectionConfig)    | set timeout (in second) or deadline for every connection, default 300 seconds. A value of 0 will disable deadlines on connections | no      |
 | tls       | [`tlsConfig`](#tlsconfig)   | set tls configuration if host use tls | no      |
 
+## mdnsTargetConfig
+| Field       | Type          | Description                     | Required |
+| ----------- | ------------- | ------------------------------- | -------- |
+| serviceName | `<string>`    | The mDNS service name to resolve. Must start with an underscore. | yes      |
+| ipv4        | `bool`        | Enable the lookup of IPv4 addresses for this service | no    |
+| ipv6        | `bool`        | Enable the lookup of IPv6 addresses for this service | no    |
+| connection  | [`connectionConfig`](#connectionConfig)    | set timeout (in second) or deadline for every connection, default 300 seconds. A value of 0 will disable deadlines on connections | no      |
+| tls         | [`tlsConfig`](#tlsconfig) | set tls configuration if host use tls    | no      |
+
+At least one of `ipv4` or `ipv6` needs to be set to `true`.
 
 ## connectionConfig
 | Field    | Type          | Description                     | Required |
