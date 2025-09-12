@@ -115,9 +115,27 @@ func (a *avahiResolver) trackService(name string) error {
 		cancelFunc:  cancel,
 	}
 
-	serviceBrowser, err := a.avahiServer.ServiceBrowserNew(avahi.InterfaceUnspec, avahi.ProtoUnspec, name, "local", 0)
-	if err != nil {
-		return fmt.Errorf("avahi.ServiceBrowserNew() failed: %w", err)
+	var serviceBrowser *avahi.ServiceBrowser
+
+	makeServiceBrowser := func() error {
+		var err error
+
+		if serviceBrowser != nil {
+			a.avahiServer.ServiceBrowserFree(serviceBrowser)
+		}
+
+		serviceBrowser, err = a.avahiServer.ServiceBrowserNew(avahi.InterfaceUnspec, avahi.ProtoUnspec, name, "local", 0)
+		if err != nil {
+			return fmt.Errorf("avahi.ServiceBrowserNew() failed: %w", err)
+		}
+
+		return nil
+	}
+
+	if err := makeServiceBrowser(); err != nil {
+		log.Error().Err(err).Msg("Failed to create service browser")
+
+		return err
 	}
 
 	keyForService := func(service avahi.Service) string {
@@ -144,6 +162,16 @@ func (a *avahiResolver) trackService(name string) error {
 				tracker.mutex.Lock()
 				delete(tracker.services, keyForService(avahiService))
 				tracker.mutex.Unlock()
+
+			case <-time.After(time.Minute):
+				// This is ugly: There is a race condition between the startup of the
+				// Avahi daemon and the readiness of the interfaces will prevent any
+				// services from being discovered.
+				if err := makeServiceBrowser(); err != nil {
+					log.Error().Err(err).Msg("Failed to re-create service browser")
+
+					return
+				}
 
 			case <-ctx.Done():
 				a.avahiServer.ServiceBrowserFree(serviceBrowser)
