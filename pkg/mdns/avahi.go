@@ -31,6 +31,18 @@ type avahiResolver struct {
 	tracker      map[string]*serviceTracker
 }
 
+func makeProto(v4, v6 bool) int32 {
+	if v4 && v6 {
+		return avahi.ProtoUnspec
+	} else if v4 {
+		return avahi.ProtoInet
+	} else if v6 {
+		return avahi.ProtoInet6
+	}
+
+	return avahi.ProtoUnspec
+}
+
 func (a *avahiResolver) resolveService(name string, v4, v6 bool, timeout time.Duration) ([]net.TCPAddr, error) {
 	a.trackerMutex.Lock()
 	tracker, ok := a.tracker[name]
@@ -54,17 +66,7 @@ func (a *avahiResolver) resolveService(name string, v4, v6 bool, timeout time.Du
 		go func(s avahi.Service) {
 			defer wg.Done()
 
-			var proto int32
-
-			if v4 && v6 {
-				proto = avahi.ProtoUnspec
-			} else if v4 {
-				proto = avahi.ProtoInet
-			} else if v6 {
-				proto = avahi.ProtoInet6
-			}
-
-			resolver, err := tracker.avahiServer.ServiceResolverNew(s.Interface, proto, s.Name, s.Type, s.Domain, s.Protocol, 0)
+			resolver, err := tracker.avahiServer.ServiceResolverNew(s.Interface, makeProto(v4, v6), s.Name, s.Type, s.Domain, s.Protocol, 0)
 			if err != nil {
 				log.Warn().Err(err).Msg("avahi.ServiceResolverNew() failed")
 				return
@@ -99,7 +101,7 @@ func (a *avahiResolver) resolveService(name string, v4, v6 bool, timeout time.Du
 	return addrs, nil
 }
 
-func (a *avahiResolver) trackService(name string) error {
+func (a *avahiResolver) trackService(name string, v4, v6 bool) error {
 	a.trackerMutex.Lock()
 	defer a.trackerMutex.Unlock()
 
@@ -124,7 +126,7 @@ func (a *avahiResolver) trackService(name string) error {
 			a.avahiServer.ServiceBrowserFree(serviceBrowser)
 		}
 
-		serviceBrowser, err = a.avahiServer.ServiceBrowserNew(avahi.InterfaceUnspec, avahi.ProtoUnspec, name, "local", 0)
+		serviceBrowser, err = a.avahiServer.ServiceBrowserNew(avahi.InterfaceUnspec, makeProto(v4, v6), name, "local", 0)
 		if err != nil {
 			return fmt.Errorf("avahi.ServiceBrowserNew() failed: %w", err)
 		}
@@ -216,7 +218,7 @@ func newAvahiResolver() (*avahiResolver, error) {
 
 // Public interface
 
-func TrackService(name string) error {
+func TrackService(name string, v4, v6 bool) error {
 	if resolver == nil {
 		var err error
 
@@ -226,7 +228,7 @@ func TrackService(name string) error {
 		}
 	}
 
-	return resolver.trackService(name)
+	return resolver.trackService(name, v4, v6)
 }
 
 func UntrackServices() {
