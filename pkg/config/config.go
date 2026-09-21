@@ -14,7 +14,10 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-var defaultTimeout = 300 * time.Second
+const (
+	defaultTimeout        = 300 * time.Second
+	defaultConnectTimeout = 5 * time.Second
+)
 
 type hostConfigType int
 
@@ -54,9 +57,9 @@ type MDNSTargetConfig struct {
 }
 
 type ConnectionConfig struct {
-	ConnectTimeout         int    `yaml:"connectTimeout"` // TODO: Implement connect timeout
+	ConnectTimeout         string `yaml:"connectTimeout"`
 	Timeout                string `yaml:"timeout"`
-	IdleTimeout            int    `yaml:"idleTimeout"` // TODO: Implement idle timeout
+	IdleTimeout            string `yaml:"idleTimeout"` // TODO: Implement idle timeout
 	ConnectTimeoutDuration time.Duration
 	TimeoutDuration        time.Duration
 	IdleTimeoutDuration    time.Duration
@@ -203,6 +206,10 @@ func validateConfig(c *Config) (*Config, error) {
 				return nil, errors.New("server", fmt.Sprintf("failed to parse timeout servers.[%d].targets[%d]: %v", i, j, err))
 			}
 
+			if err := setConnectTimeout(&c.ServerConfigs[i].Targets[j].ConnectionConfig); err != nil {
+				return nil, errors.New("server", fmt.Sprintf("failed to parse connect timeout servers.[%d].targets[%d]: %v", i, j, err))
+			}
+
 			setSAN(&c.ServerConfigs[i].Targets[j].TLSConfig)
 		}
 
@@ -220,6 +227,10 @@ func validateConfig(c *Config) (*Config, error) {
 				return nil, errors.New("server", fmt.Sprintf("failed to parse timeout servers.[%d].mdnsServiceTarget: %v", i, err))
 			}
 
+			if err := setConnectTimeout(&c.ServerConfigs[i].MDNSTarget.ConnectionConfig); err != nil {
+				return nil, errors.New("server", fmt.Sprintf("failed to parse connect timeout servers.[%d].mdnsServiceTarget: %v", i, err))
+			}
+
 			setSAN(&c.ServerConfigs[i].MDNSTarget.TLSConfig)
 		}
 
@@ -233,6 +244,10 @@ func validateConfig(c *Config) (*Config, error) {
 				return nil, errors.New("server", fmt.Sprintf("failed to parse timeout servers.[%d].mirror: %v", i, err))
 			}
 
+			if err := setConnectTimeout(&mirror.ConnectionConfig); err != nil {
+				return nil, errors.New("server", fmt.Sprintf("failed to parse connect timeout servers.[%d].mirror: %v", i, err))
+			}
+
 			setSAN(&mirror.TLSConfig)
 		}
 		// set all listener role to server
@@ -242,6 +257,10 @@ func validateConfig(c *Config) (*Config, error) {
 
 		if err := setTimeout(&listener.ConnectionConfig); err != nil {
 			return nil, errors.New("server", fmt.Sprintf("failed to parse timeout servers.[%d]: %v", i, err))
+		}
+
+		if err := setConnectTimeout(&listener.ConnectionConfig); err != nil {
+			return nil, errors.New("server", fmt.Sprintf("failed to parse connect timeout servers.[%d]: %v", i, err))
 		}
 
 		setSAN(&listener.TLSConfig)
@@ -268,25 +287,28 @@ type timeoutFormat struct {
 	duration time.Duration
 }
 
-func setTimeout(c *ConnectionConfig) error {
-	tStr := c.Timeout
+func parseTimeout(tStr string) (time.Duration, error) {
+	t, err := time.ParseDuration(tStr)
+	if err != nil {
+		return -1, fmt.Errorf("can't parse as duration '%s': %w", tStr, err)
+	}
 
-	if tStr == "" {
+	if t < 0 {
+		return -1, fmt.Errorf("can't use negative value")
+	}
+
+	return t, nil
+}
+
+func setTimeout(c *ConnectionConfig) error {
+	if c.Timeout == "" {
 		c.TimeoutDuration = defaultTimeout
 		return nil
 	}
 
-	if tStr == "0" {
-		return nil
-	}
-
-	t, err := time.ParseDuration(tStr)
+	t, err := parseTimeout(c.Timeout)
 	if err != nil {
-		return fmt.Errorf("can't parse timeout '%s': %w", tStr, err)
-	}
-
-	if t < 0 {
-		return fmt.Errorf("can't use negative value for timeout")
+		return fmt.Errorf("cannot set timeout: %w", err)
 	}
 
 	log.Info().
@@ -294,6 +316,30 @@ func setTimeout(c *ConnectionConfig) error {
 		Msg("Applying timeout")
 
 	c.TimeoutDuration = t
+
+	return nil
+}
+
+func setConnectTimeout(c *ConnectionConfig) error {
+	if c.ConnectTimeout == "" {
+		c.ConnectTimeoutDuration = defaultConnectTimeout
+		return nil
+	}
+
+	t, err := parseTimeout(c.ConnectTimeout)
+	if err != nil {
+		return fmt.Errorf("cannot set connect timeout: %w", err)
+	}
+
+	if t == 0 {
+		t = defaultConnectTimeout
+	}
+
+	log.Info().
+		Dur("timeout", t).
+		Msg("Applying connect timeout")
+
+	c.ConnectTimeoutDuration = t
 
 	return nil
 }

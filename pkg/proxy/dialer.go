@@ -26,14 +26,14 @@ var (
 	mirrorDialErr   = metrics.AddCounterVecMultiLabels("octo_mirror_dial_error", "total dial error when calling an mirror upstream")
 )
 
-func newDial() *net.Dialer {
+func newDial(timeout time.Duration) *net.Dialer {
 	return &net.Dialer{
-		Timeout: 5 * time.Second,
+		Timeout: timeout,
 	}
 }
 
 func dialTarget(ctx context.Context, hc config.HostConfig) (net.Conn, error) {
-	d := newDial()
+	d := newDial(hc.ConnectTimeoutDuration)
 
 	if hc.IsSimple() || hc.IsMutual() {
 		tlsConf, err := getTLSConfig(hc.TLSConfig)
