@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/tls"
 	"log"
 	"sync"
@@ -9,7 +10,7 @@ import (
 )
 
 func SendData(hc config.HostConfig, message []byte, readResponse bool) error {
-	d, err := dialTarget(hc)
+	d, err := dialTarget(context.Background(), hc)
 	if err != nil {
 		log.Println(err)
 		return err

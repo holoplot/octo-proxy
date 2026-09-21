@@ -1,12 +1,15 @@
 package proxy
 
 import (
+	"context"
 	"crypto/tls"
 	"io"
 	"math/rand"
 	"net"
 	"reflect"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nothinux/octo-proxy/pkg/config"
@@ -29,7 +32,7 @@ func newDial() *net.Dialer {
 	}
 }
 
-func dialTarget(hc config.HostConfig) (net.Conn, error) {
+func dialTarget(ctx context.Context, hc config.HostConfig) (net.Conn, error) {
 	d := newDial()
 
 	if hc.IsSimple() || hc.IsMutual() {
@@ -46,24 +49,54 @@ func dialTarget(hc config.HostConfig) (net.Conn, error) {
 		return tls.DialWithDialer(d, "tcp", net.JoinHostPort(hc.Host, hc.Port), tlsConf.Config)
 	}
 
-	return d.Dial("tcp", net.JoinHostPort(hc.Host, hc.Port))
+	return d.DialContext(ctx, "tcp", net.JoinHostPort(hc.Host, hc.Port))
 }
 
-func dialTargets(hcs []config.HostConfig) (net.Conn, config.HostConfig, error) {
-	tConf := &config.HostConfig{}
+func dialTargets(ctx context.Context, hcs []config.HostConfig) (net.Conn, config.HostConfig, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var (
+		wg            sync.WaitGroup
+		succeeded     atomic.Bool
+		succeededConn net.Conn
+		succeededConf config.HostConfig
+	)
 
 	for _, hc := range hcs {
-		*tConf = hc
-		c, err := dialTarget(hc)
-		if err == nil {
-			if !timeoutIsZero(hc) {
-				c.SetDeadline(time.Now().Add(hc.TimeoutDuration))
+		wg.Add(1)
+
+		go func(hc config.HostConfig) {
+			defer wg.Done()
+
+			c, err := dialTarget(ctx, hc)
+			if err == nil {
+				// All other pending connection dials will return with an error
+				cancel()
+
+				if succeeded.Swap(true) {
+					// Some other connection already succeeded, so we need to close ours
+					_ = c.Close()
+					return
+				}
+
+				if !timeoutIsZero(hc) {
+					c.SetDeadline(time.Now().Add(hc.TimeoutDuration))
+				}
+
+				succeededConn = c
+				succeededConf = hc
 			}
-			return c, *tConf, nil
-		}
+		}(hc)
 	}
 
-	return nil, *tConf, errors.New("targets", "no backends could be reached")
+	wg.Wait()
+
+	if succeeded.Load() {
+		return succeededConn, succeededConf, nil
+	}
+
+	return nil, config.HostConfig{}, errors.New("targets", "no backends could be reached")
 }
 
 func getTargets(c config.ServerConfig) ([]net.Conn, io.Writer, config.HostConfig, error) {
@@ -98,7 +131,7 @@ func getTargets(c config.ServerConfig) ([]net.Conn, io.Writer, config.HostConfig
 		targets[i], targets[j] = targets[j], targets[i]
 	})
 
-	t, tc, err := dialTargets(targets)
+	t, tc, err := dialTargets(context.Background(), targets)
 	if err != nil {
 		upstreamDialErr.With(prometheus.Labels{"host": tc.Host, "port": tc.Port}).Inc()
 		return nil, nil, config.HostConfig{}, errors.New(c.Name, err.Error())
@@ -107,7 +140,7 @@ func getTargets(c config.ServerConfig) ([]net.Conn, io.Writer, config.HostConfig
 	var m net.Conn
 
 	if !reflect.DeepEqual(config.HostConfig{}, c.Mirror) {
-		m, err = dialTarget(c.Mirror)
+		m, err = dialTarget(context.Background(), c.Mirror)
 		if err != nil {
 			mirrorDialErr.With(prometheus.Labels{"host": c.Mirror.Host, "port": c.Mirror.Port}).Inc()
 			log.Warn().
