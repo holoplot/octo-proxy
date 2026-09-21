@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"reflect"
-	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +13,8 @@ import (
 
 	"gopkg.in/yaml.v2"
 )
+
+var defaultTimeout = 300 * time.Second
 
 type hostConfigType int
 
@@ -268,36 +269,20 @@ type timeoutFormat struct {
 }
 
 func setTimeout(c *ConnectionConfig) error {
-	var format []timeoutFormat
-	format = append(format, timeoutFormat{"ms", time.Millisecond})
-	format = append(format, timeoutFormat{"s", time.Second})
+	tStr := c.Timeout
 
-	timeout := c.Timeout
-
-	if timeout == "" {
-		c.TimeoutDuration = time.Duration(300) * time.Second
+	if tStr == "" {
+		c.TimeoutDuration = defaultTimeout
 		return nil
 	}
 
-	if timeout == "0" {
+	if tStr == "0" {
 		return nil
 	}
 
-	for _, v := range format {
-		if strings.HasSuffix(timeout, v.unit) {
-			return setTimeoutDuration(c, strings.TrimSuffix(timeout, v.unit), v.duration)
-		}
-	}
-
-	// use seconds if user not provide unit
-	return setTimeoutDuration(c, timeout, time.Second)
-}
-
-func setTimeoutDuration(c *ConnectionConfig, timeout string, td time.Duration) error {
-	t, err := strconv.Atoi(timeout)
+	t, err := time.ParseDuration(tStr)
 	if err != nil {
-		log.Error().Err(err).Msg("Atoi")
-		return err
+		return fmt.Errorf("can't parse timeout '%s': %w", tStr, err)
 	}
 
 	if t < 0 {
@@ -305,10 +290,10 @@ func setTimeoutDuration(c *ConnectionConfig, timeout string, td time.Duration) e
 	}
 
 	log.Info().
-		Int("seconds", t).
+		Dur("timeout", t).
 		Msg("Applying timeout")
 
-	c.TimeoutDuration = time.Duration(t) * td
+	c.TimeoutDuration = t
 
 	return nil
 }
