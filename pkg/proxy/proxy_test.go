@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"log"
@@ -544,7 +545,7 @@ func TestUnreachableTarget(t *testing.T) {
 			Host: "127.0.0.1",
 			Port: "9000",
 		}
-		d, err := dialTarget(hc)
+		d, err := dialTarget(context.Background(), hc)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -634,7 +635,7 @@ func TestProxyConcurrent(t *testing.T) {
 					Host: "127.0.0.1",
 					Port: "9000",
 				}
-				d, err := dialTarget(hc)
+				d, err := dialTarget(context.Background(), hc)
 				if err != nil {
 					t.Error(err)
 				}
@@ -682,7 +683,7 @@ func TestProxyWithSlowTarget(t *testing.T) {
 			Host: "127.0.0.1",
 			Port: "9000",
 		}
-		d, err := dialTarget(hc)
+		d, err := dialTarget(context.Background(), hc)
 		if err != nil {
 			t.Error(err)
 		}
@@ -751,7 +752,7 @@ func TestProxyWithZeroTimeout(t *testing.T) {
 			Host: "127.0.0.1",
 			Port: "9000",
 		}
-		d, err := dialTarget(hc)
+		d, err := dialTarget(context.Background(), hc)
 		if err != nil {
 			t.Error(err)
 		}
