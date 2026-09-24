@@ -103,7 +103,7 @@ func getTargets(c config.ServerConfig) ([]net.Conn, io.Writer, config.HostConfig
 	targets := c.Targets
 
 	if c.MDNSTarget.ServiceName != "" {
-		addrs, err := mdns.ResolveService(c.MDNSTarget.ServiceName, c.MDNSTarget.IPv4, c.MDNSTarget.IPv6, time.Second)
+		addrs, err := mdns.ResolveService(c.MDNSTarget.ServiceName, c.MDNSTarget.IPv4, c.MDNSTarget.IPv6)
 		if err == nil {
 			log.Debug().
 				Interface("addrs", addrs).
