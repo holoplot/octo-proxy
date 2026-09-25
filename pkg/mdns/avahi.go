@@ -79,6 +79,14 @@ func (a *avahiResolver) resolveService(name string, v4, v6 bool) ([]net.TCPAddr,
 
 	if len(addrs) == 0 {
 		log.Debug().Str("name", name).Msg("No mDNS addresses found for service")
+	} else {
+		s := make([]string, len(addrs))
+
+		for i, addr := range addrs {
+			s[i] = addr.AddrPort().String()
+		}
+
+		log.Debug().Str("name", name).Strs("ips", s).Msg("Resolved mDNS service")
 	}
 
 	return addrs, nil
