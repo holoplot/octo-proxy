@@ -87,7 +87,7 @@ func runMain() error {
 
 	fmt.Fprint(os.Stdout, showBanner)
 
-	setupLogger(*debug)
+	setupLogger(*debug || os.Getenv("LOG_LEVEL") == "debug")
 
 	// run with flag
 	if *target != "" {
