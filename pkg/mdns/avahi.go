@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"sync"
-	"time"
 
 	dbus "github.com/godbus/dbus/v5"
 	"github.com/holoplot/go-avahi"
@@ -16,9 +15,15 @@ import (
 
 var resolver *avahiResolver
 
+type service struct {
+	resolver   *avahi.ServiceResolver
+	addrsMutex sync.RWMutex
+	v4, v6     *net.TCPAddr
+}
+
 type serviceTracker struct {
 	avahiServer *avahi.Server
-	services    map[string]avahi.Service
+	services    map[string]*service
 	mutex       sync.Mutex
 	cancelFunc  context.CancelFunc
 }
@@ -43,7 +48,7 @@ func makeProto(v4, v6 bool) int32 {
 	return avahi.ProtoUnspec
 }
 
-func (a *avahiResolver) resolveService(name string, v4, v6 bool, timeout time.Duration) ([]net.TCPAddr, error) {
+func (a *avahiResolver) resolveService(name string, v4, v6 bool) ([]net.TCPAddr, error) {
 	a.trackerMutex.Lock()
 	tracker, ok := a.tracker[name]
 	a.trackerMutex.Unlock()
@@ -52,51 +57,29 @@ func (a *avahiResolver) resolveService(name string, v4, v6 bool, timeout time.Du
 		return nil, fmt.Errorf("service %s not tracked", name)
 	}
 
+	addrs := make([]net.TCPAddr, 0)
+
 	tracker.mutex.Lock()
 
-	var (
-		addrs []net.TCPAddr
-		wg    sync.WaitGroup
-		mutex sync.Mutex
-	)
-
 	for _, service := range tracker.services {
-		wg.Add(1)
+		service.addrsMutex.RLock()
 
-		go func(s avahi.Service) {
-			defer wg.Done()
+		if v4 && service.v4 != nil {
+			addrs = append(addrs, *service.v4)
+		}
 
-			resolver, err := tracker.avahiServer.ServiceResolverNew(s.Interface, makeProto(v4, v6), s.Name, s.Type, s.Domain, s.Protocol, 0)
-			if err != nil {
-				log.Warn().Err(err).Msg("avahi.ServiceResolverNew() failed")
-				return
-			}
+		if v6 && service.v6 != nil {
+			addrs = append(addrs, *service.v6)
+		}
 
-			defer tracker.avahiServer.ServiceResolverFree(resolver)
-
-			select {
-			case resolvedService, ok := <-resolver.FoundChannel:
-				if !ok {
-					return
-				}
-
-				addr := net.TCPAddr{
-					IP:   net.ParseIP(resolvedService.Address),
-					Port: int(resolvedService.Port),
-				}
-
-				mutex.Lock()
-				addrs = append(addrs, addr)
-				mutex.Unlock()
-
-			case <-time.After(timeout):
-			}
-		}(service)
+		service.addrsMutex.RUnlock()
 	}
 
 	tracker.mutex.Unlock()
 
-	wg.Wait()
+	if len(addrs) == 0 {
+		log.Debug().Str("name", name).Msg("No mDNS addresses found for service")
+	}
 
 	return addrs, nil
 }
@@ -113,7 +96,7 @@ func (a *avahiResolver) trackService(name string, v4, v6 bool) error {
 
 	tracker := &serviceTracker{
 		avahiServer: a.avahiServer,
-		services:    make(map[string]avahi.Service),
+		services:    make(map[string]*service),
 		cancelFunc:  cancel,
 	}
 
@@ -141,10 +124,32 @@ func (a *avahiResolver) trackService(name string, v4, v6 bool) error {
 	}
 
 	keyForService := func(service avahi.Service) string {
-		return fmt.Sprintf("%s.%s%%%d", service.Name, service.Domain, service.Interface)
+		return fmt.Sprintf("%s.%s%%%d/%d", service.Name, service.Domain, service.Interface, service.Protocol)
 	}
 
 	go func() {
+		defer func() {
+			a.trackerMutex.Lock()
+
+			// Only remove ourselves conditionally, in case another tracker was installed meanwhile.
+			if a.tracker[name] == tracker {
+				delete(a.tracker, name)
+			}
+
+			a.trackerMutex.Unlock()
+
+			tracker.mutex.Lock()
+			services := tracker.services
+			tracker.services = nil
+			tracker.mutex.Unlock()
+
+			for _, s := range services {
+				a.avahiServer.ServiceResolverFree(s.resolver)
+			}
+
+			a.avahiServer.ServiceBrowserFree(serviceBrowser)
+		}()
+
 		for {
 			select {
 			case avahiService, ok := <-serviceBrowser.AddChannel:
@@ -152,31 +157,76 @@ func (a *avahiResolver) trackService(name string, v4, v6 bool) error {
 					return
 				}
 
+				key := keyForService(avahiService)
+
 				tracker.mutex.Lock()
-				tracker.services[keyForService(avahiService)] = avahiService
+				_, tracked := tracker.services[key]
 				tracker.mutex.Unlock()
+
+				if tracked {
+					continue
+				}
+
+				resolver, err := tracker.avahiServer.ServiceResolverNew(avahiService.Interface, avahiService.Protocol,
+					avahiService.Name, avahiService.Type, avahiService.Domain, makeProto(v4, v6), 0)
+				if err != nil {
+					log.Warn().Err(err).Msg("avahi.ServiceResolverNew() failed")
+
+					continue
+				}
+
+				s := &service{
+					resolver: resolver,
+				}
+
+				tracker.mutex.Lock()
+				tracker.services[key] = s
+				tracker.mutex.Unlock()
+
+				go func(s *service, resolver *avahi.ServiceResolver) {
+					for resolvedService := range resolver.FoundChannel {
+						addr := &net.TCPAddr{
+							IP:   net.ParseIP(resolvedService.Address),
+							Port: int(resolvedService.Port),
+						}
+
+						if addr.IP.IsLinkLocalUnicast() {
+							if iface, err := net.InterfaceByIndex(int(resolvedService.Interface)); err == nil {
+								addr.Zone = iface.Name
+							}
+						}
+
+						s.addrsMutex.Lock()
+
+						if resolvedService.Aprotocol == avahi.ProtoInet {
+							s.v4 = addr
+						}
+
+						if resolvedService.Aprotocol == avahi.ProtoInet6 {
+							s.v6 = addr
+						}
+
+						s.addrsMutex.Unlock()
+					}
+				}(s, resolver)
 
 			case avahiService, ok := <-serviceBrowser.RemoveChannel:
 				if !ok {
 					return
 				}
 
+				key := keyForService(avahiService)
+
 				tracker.mutex.Lock()
-				delete(tracker.services, keyForService(avahiService))
+				s, ok := tracker.services[key]
+				delete(tracker.services, key)
 				tracker.mutex.Unlock()
 
-			case <-time.After(time.Minute):
-				// This is ugly: There is a race condition between the startup of the
-				// Avahi daemon and the readiness of the interfaces will prevent any
-				// services from being discovered.
-				if err := makeServiceBrowser(); err != nil {
-					log.Error().Err(err).Msg("Failed to re-create service browser")
-
-					return
+				if ok {
+					tracker.avahiServer.ServiceResolverFree(s.resolver)
 				}
 
 			case <-ctx.Done():
-				a.avahiServer.ServiceBrowserFree(serviceBrowser)
 				return
 			}
 		}
@@ -237,10 +287,10 @@ func UntrackServices() {
 	}
 }
 
-func ResolveService(name string, v4, v6 bool, timeout time.Duration) ([]net.TCPAddr, error) {
+func ResolveService(name string, v4, v6 bool) ([]net.TCPAddr, error) {
 	if resolver == nil {
 		return nil, fmt.Errorf("no resolver")
 	}
 
-	return resolver.resolveService(name, v4, v6, timeout)
+	return resolver.resolveService(name, v4, v6)
 }
