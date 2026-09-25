@@ -2,7 +2,13 @@
 
 package mdns
 
-func TrackService(string) error {
+import (
+	"fmt"
+	"net"
+	"time"
+)
+
+func TrackService(name string, v4, v6 bool) error {
 	return nil
 }
 
