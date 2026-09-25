@@ -85,7 +85,7 @@ func runMain() error {
 	}
 	flag.Parse()
 
-	fmt.Fprintf(os.Stdout, showBanner)
+	fmt.Fprint(os.Stdout, showBanner)
 
 	setupLogger(*debug)
 
