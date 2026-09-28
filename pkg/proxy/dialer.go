@@ -105,10 +105,6 @@ func getTargets(c config.ServerConfig) ([]net.Conn, io.Writer, config.HostConfig
 	if c.MDNSTarget.ServiceName != "" {
 		addrs, err := mdns.ResolveService(c.MDNSTarget.ServiceName, c.MDNSTarget.IPv4, c.MDNSTarget.IPv6)
 		if err == nil {
-			log.Debug().
-				Interface("addrs", addrs).
-				Msg("mDNS lookup finished")
-
 			for _, addr := range addrs {
 				target := config.HostConfig{
 					Host:             addr.IP.String(),
