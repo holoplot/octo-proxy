@@ -83,7 +83,7 @@ func (a *avahiResolver) resolveService(name string, v4, v6 bool) ([]net.TCPAddr,
 		s := make([]string, len(addrs))
 
 		for i, addr := range addrs {
-			s[i] = addr.AddrPort().String()
+			s[i] = fmt.Sprintf("%s:%d", addr.IP.String(), addr.Port)
 		}
 
 		log.Debug().Str("name", name).Strs("ips", s).Msg("Resolved mDNS service")
