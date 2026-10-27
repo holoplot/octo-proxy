@@ -141,7 +141,11 @@ func startDNSWatchProxy(t *testing.T, watch bool) *dnsWatchSetup {
 
 	p := New("dnswatch-test")
 	p.DNSWatch = g
-	go p.Run(cfg.ServerConfigs[0])
+	p.Wg.Add(1)
+	go func() {
+		p.Run(cfg.ServerConfigs[0])
+		p.Wg.Done()
+	}()
 
 	t.Cleanup(func() {
 		p.Shutdown()

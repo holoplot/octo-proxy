@@ -28,6 +28,10 @@ var (
 // LookupFunc returns the IPv4 addresses of host.
 type LookupFunc func(ctx context.Context, host string) ([]net.IP, error)
 
+// lookupTimeout bounds one lookup. It doesn't depend on the interval, so that
+// a short interval on a slow resolver still gets answers.
+const lookupTimeout = 5 * time.Second
+
 // lookupIPv4 asks the local resolver for the hostname's IPv4 addresses.
 func lookupIPv4(ctx context.Context, host string) ([]net.IP, error) {
 	return net.DefaultResolver.LookupIP(ctx, "ip4", host)
@@ -142,7 +146,7 @@ func (g *Group) Start() {
 			defer t.Stop()
 
 			for {
-				w.poll(ctx, g.interval)
+				w.poll(ctx)
 
 				select {
 				case <-ctx.Done():
@@ -164,19 +168,18 @@ func (g *Group) Stop() {
 	g.wg.Wait()
 }
 
-func (g *Group) pollAll(ctx context.Context) {
-	for _, w := range g.watchers {
-		w.poll(ctx, g.interval)
-	}
-}
-
 // poll looks up the host once and closes every connection whose address is
 // not in a successful, non-empty answer. It re-checks all connections on every
 // poll, so a dial that raced a change is caught on the next one.
-func (w *watcher) poll(ctx context.Context, timeout time.Duration) {
-	lctx, cancel := context.WithTimeout(ctx, timeout)
+func (w *watcher) poll(ctx context.Context) {
+	lctx, cancel := context.WithTimeout(ctx, lookupTimeout)
 	ips, err := w.lookup(lctx, w.host)
 	cancel()
+
+	// Stopped during the lookup: that isn't a failed lookup.
+	if ctx.Err() != nil {
+		return
+	}
 
 	if err != nil || len(ips) == 0 {
 		resolveErrors.With(prometheus.Labels{"name": w.host}).Inc()
@@ -223,6 +226,18 @@ func (w *watcher) poll(ctx context.Context, timeout time.Duration) {
 
 	w.mu.Unlock()
 
+	for _, c := range toClose {
+		connsMoved.With(prometheus.Labels{"name": w.host}).Inc()
+
+		log.Info().
+			Str("host", w.host).
+			Str("address", c.ip).
+			Msg("closing connection, its address left the DNS answer")
+
+		c.close()
+	}
+
+	// Logged after closing, so the CNAME lookup doesn't delay the move.
 	if changed || recovered {
 		if changed && !first {
 			answerChanges.With(prometheus.Labels{"name": w.host}).Inc()
@@ -234,17 +249,6 @@ func (w *watcher) poll(ctx context.Context, timeout time.Duration) {
 			Str("cname", w.cname(ctx)).
 			Bool("changed", changed && !first).
 			Msg("DNS watch answer")
-	}
-
-	for _, c := range toClose {
-		connsMoved.With(prometheus.Labels{"name": w.host}).Inc()
-
-		log.Info().
-			Str("host", w.host).
-			Str("address", c.ip).
-			Msg("closing connection, its address left the DNS answer")
-
-		c.close()
 	}
 }
 

@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"net"
 	"slices"
 	"testing"
 	"time"
@@ -38,12 +39,12 @@ func TestRunProxySharesOneDNSWatchGroup(t *testing.T) {
 		ServerConfigs: []config.ServerConfig{
 			{
 				Name:     "proxy-a",
-				Listener: config.HostConfig{Host: "127.0.0.1", Port: "9801"},
+				Listener: config.HostConfig{Host: "127.0.0.1", Port: freePort(t)},
 				Targets:  []config.HostConfig{{Host: "controller.test", Port: "4222", DNSWatch: true}},
 			},
 			{
 				Name:     "proxy-b",
-				Listener: config.HostConfig{Host: "127.0.0.1", Port: "9802"},
+				Listener: config.HostConfig{Host: "127.0.0.1", Port: freePort(t)},
 				Targets:  []config.HostConfig{{Host: "controller.test", Port: "4317", DNSWatch: true}},
 			},
 		},
@@ -69,7 +70,7 @@ func TestRunProxyWithoutDNSWatch(t *testing.T) {
 		ServerConfigs: []config.ServerConfig{
 			{
 				Name:     "proxy-a",
-				Listener: config.HostConfig{Host: "127.0.0.1", Port: "9803"},
+				Listener: config.HostConfig{Host: "127.0.0.1", Port: freePort(t)},
 				Targets:  []config.HostConfig{{Host: "controller.test", Port: "4222"}},
 			},
 		},
@@ -81,4 +82,17 @@ func TestRunProxyWithoutDNSWatch(t *testing.T) {
 	if g != nil {
 		t.Error("started a DNS watch group although no target has dnsWatch set")
 	}
+}
+
+func freePort(t *testing.T) string {
+	t.Helper()
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	_, port, _ := net.SplitHostPort(l.Addr().String())
+	return port
 }

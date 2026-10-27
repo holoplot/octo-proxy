@@ -8,6 +8,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 const host = "controller.test"
@@ -267,5 +270,98 @@ func TestStartPollsAndStopEndsPolling(t *testing.T) {
 
 	if got := r.lookups.Load(); got != n {
 		t.Errorf("lookups continued after Stop: %d, then %d", n, got)
+	}
+}
+
+func (g *Group) pollAll(ctx context.Context) {
+	for _, w := range g.watchers {
+		w.poll(ctx)
+	}
+}
+
+func TestCloseDoesNotWaitForCNAMELookup(t *testing.T) {
+	r := &fakeResolver{}
+	r.set("10.0.0.1")
+	g := newTestGroup(r)
+
+	g.pollAll(context.Background())
+
+	var mu sync.Mutex
+	var events []string
+	record := func(e string) {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, e)
+	}
+
+	for _, w := range g.watchers {
+		w.lookupCNAME = func(ctx context.Context, h string) (string, error) {
+			record("cname")
+			return h + ".", nil
+		}
+	}
+
+	g.Register(host, net.ParseIP("10.0.0.1"), func() { record("close") })
+
+	r.set("10.0.0.2")
+	g.pollAll(context.Background())
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(events) == 0 || events[0] != "close" {
+		t.Errorf("got %v, want the connection closed before the CNAME lookup", events)
+	}
+}
+
+func TestStopDuringLookupIsNotAnError(t *testing.T) {
+	const stopHost = "stop.test"
+
+	started := make(chan struct{}, 1)
+	lookup := func(ctx context.Context, h string) ([]net.IP, error) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	g := newGroup(time.Hour, []string{stopHost}, lookup)
+	g.Start()
+	<-started
+	g.Stop()
+
+	if n := testutil.ToFloat64(resolveErrors.With(prometheus.Labels{"name": stopHost})); n != 0 {
+		t.Errorf("counted %v resolve errors for a lookup cancelled by Stop, want 0", n)
+	}
+}
+
+func TestLookupSlowerThanIntervalStillWorks(t *testing.T) {
+	r := &fakeResolver{}
+	r.set("10.0.0.2")
+
+	slow := func(ctx context.Context, h string) ([]net.IP, error) {
+		select {
+		case <-time.After(30 * time.Millisecond):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return r.lookup(ctx, h)
+	}
+
+	g := newGroup(10*time.Millisecond, []string{host}, slow)
+	a := register(g, "10.0.0.1")
+
+	g.Start()
+	defer g.Stop()
+
+	deadline := time.Now().Add(time.Second)
+	for !a.closed() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if !a.closed() {
+		t.Error("a lookup slower than the interval never completed, so nothing moved")
 	}
 }
