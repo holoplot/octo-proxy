@@ -53,9 +53,6 @@ func TestRunProxySharesOneDNSWatchGroup(t *testing.T) {
 	proxies, g := ss.runProxy()
 	defer shutdown(proxies, g, nil)
 
-	// Proxy.Shutdown deadlocks if it runs before Proxy.Run has started.
-	time.Sleep(200 * time.Millisecond)
-
 	if g == nil {
 		t.Fatal("no DNS watch group although targets have dnsWatch set")
 	}
@@ -80,9 +77,6 @@ func TestRunProxyWithoutDNSWatch(t *testing.T) {
 
 	proxies, g := ss.runProxy()
 	defer shutdown(proxies, g, nil)
-
-	// Proxy.Shutdown deadlocks if it runs before Proxy.Run has started.
-	time.Sleep(200 * time.Millisecond)
 
 	if g != nil {
 		t.Error("started a DNS watch group although no target has dnsWatch set")
