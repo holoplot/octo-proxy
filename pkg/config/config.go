@@ -15,8 +15,10 @@ import (
 )
 
 const (
-	defaultTimeout        = 300 * time.Second
-	defaultConnectTimeout = 5 * time.Second
+	defaultTimeout          = 300 * time.Second
+	defaultConnectTimeout   = 5 * time.Second
+	defaultDialStagger      = 250 * time.Millisecond
+	defaultDNSWatchInterval = 5 * time.Second
 )
 
 type hostConfigType int
@@ -31,6 +33,14 @@ const (
 type Config struct {
 	ServerConfigs []ServerConfig `yaml:"servers"`
 	MetricsConfig HostConfig     `yaml:"metrics"`
+	DNSWatch      DNSWatchConfig `yaml:"dnsWatch"`
+}
+
+// DNSWatchConfig holds the settings shared by all DNS watchers. Which targets
+// are watched is set per target with HostConfig.DNSWatch.
+type DNSWatchConfig struct {
+	Interval         string `yaml:"interval"`
+	IntervalDuration time.Duration
 }
 
 type ServerConfig struct {
@@ -44,6 +54,7 @@ type ServerConfig struct {
 type HostConfig struct {
 	Host             string `yaml:"host"`
 	Port             string `yaml:"port"`
+	DNSWatch         bool   `yaml:"dnsWatch"`
 	ConnectionConfig `yaml:"connection"`
 	TLSConfig        `yaml:"tls"`
 }
@@ -60,9 +71,11 @@ type ConnectionConfig struct {
 	ConnectTimeout         string `yaml:"connectTimeout"`
 	Timeout                string `yaml:"timeout"`
 	IdleTimeout            string `yaml:"idleTimeout"` // TODO: Implement idle timeout
+	DialStagger            string `yaml:"dialStagger"`
 	ConnectTimeoutDuration time.Duration
 	TimeoutDuration        time.Duration
 	IdleTimeoutDuration    time.Duration
+	DialStaggerDuration    time.Duration
 }
 
 type TLSConfig struct {
@@ -210,6 +223,14 @@ func validateConfig(c *Config) (*Config, error) {
 				return nil, errors.New("server", fmt.Sprintf("failed to parse connect timeout servers.[%d].targets[%d]: %v", i, j, err))
 			}
 
+			if err := setDialStagger(&c.ServerConfigs[i].Targets[j].ConnectionConfig); err != nil {
+				return nil, errors.New("server", fmt.Sprintf("failed to parse dial stagger servers.[%d].targets[%d]: %v", i, j, err))
+			}
+
+			if c.ServerConfigs[i].Targets[j].DNSWatch && hostIPIsValid(c.ServerConfigs[i].Targets[j].Host) {
+				return nil, errors.New("server", fmt.Sprintf("dnsWatch requires a hostname in servers.[%d].targets[%d]", i, j))
+			}
+
 			setSAN(&c.ServerConfigs[i].Targets[j].TLSConfig)
 		}
 
@@ -248,6 +269,14 @@ func validateConfig(c *Config) (*Config, error) {
 				return nil, errors.New("server", fmt.Sprintf("failed to parse connect timeout servers.[%d].mirror: %v", i, err))
 			}
 
+			if err := setDialStagger(&mirror.ConnectionConfig); err != nil {
+				return nil, errors.New("server", fmt.Sprintf("failed to parse dial stagger servers.[%d].mirror: %v", i, err))
+			}
+
+			if mirror.DNSWatch {
+				return nil, errors.New("server", fmt.Sprintf("dnsWatch is only supported on targets, not in servers.[%d].mirror", i))
+			}
+
 			setSAN(&mirror.TLSConfig)
 		}
 		// set all listener role to server
@@ -261,6 +290,10 @@ func validateConfig(c *Config) (*Config, error) {
 
 		if err := setConnectTimeout(&listener.ConnectionConfig); err != nil {
 			return nil, errors.New("server", fmt.Sprintf("failed to parse connect timeout servers.[%d]: %v", i, err))
+		}
+
+		if listener.DNSWatch {
+			return nil, errors.New("server", fmt.Sprintf("dnsWatch is only supported on targets, not in servers.[%d].listener", i))
 		}
 
 		setSAN(&listener.TLSConfig)
@@ -277,6 +310,14 @@ func validateConfig(c *Config) (*Config, error) {
 				return nil, errors.New("metrics", "can't bind to port that already used by listener")
 			}
 		}
+
+		if c.MetricsConfig.DNSWatch {
+			return nil, errors.New("metrics", "dnsWatch is only supported on targets")
+		}
+	}
+
+	if err := setDNSWatchInterval(&c.DNSWatch); err != nil {
+		return nil, errors.New("dnsWatch", fmt.Sprintf("failed to parse dnsWatch.interval: %v", err))
 	}
 
 	return c, nil
@@ -340,6 +381,42 @@ func setConnectTimeout(c *ConnectionConfig) error {
 		Msg("Applying connect timeout")
 
 	c.ConnectTimeoutDuration = t
+
+	return nil
+}
+
+func setDialStagger(c *ConnectionConfig) error {
+	if c.DialStagger == "" {
+		c.DialStaggerDuration = defaultDialStagger
+		return nil
+	}
+
+	t, err := parseTimeout(c.DialStagger)
+	if err != nil {
+		return fmt.Errorf("cannot set dial stagger: %w", err)
+	}
+
+	c.DialStaggerDuration = t
+
+	return nil
+}
+
+func setDNSWatchInterval(c *DNSWatchConfig) error {
+	if c.Interval == "" {
+		c.IntervalDuration = defaultDNSWatchInterval
+		return nil
+	}
+
+	t, err := parseTimeout(c.Interval)
+	if err != nil {
+		return fmt.Errorf("cannot set interval: %w", err)
+	}
+
+	if t == 0 {
+		return fmt.Errorf("interval must be greater than zero")
+	}
+
+	c.IntervalDuration = t
 
 	return nil
 }

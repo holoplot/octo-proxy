@@ -29,7 +29,7 @@ func TestRunningRunner(t *testing.T) {
 
 	// starting octo proxy
 	ss := &Server{ServerConfigs: c.ServerConfigs}
-	proxies := ss.runProxy()
+	proxies, _ := ss.runProxy()
 
 	// store created proxy data
 	octo := &Octo{
@@ -79,7 +79,7 @@ func TestRunningRunner(t *testing.T) {
 	time.Sleep(1 * time.Second)
 
 	// shutdown octo-proxy
-	shutdown(octo.Proxies, nil)
+	shutdown(octo.Proxies, octo.DNSWatch, nil)
 
 }
 
@@ -110,7 +110,7 @@ func TestRunMetrics(t *testing.T) {
 		}
 
 		time.Sleep(1 * time.Second)
-		shutdown(nil, m)
+		shutdown(nil, nil, m)
 	}
 }
 

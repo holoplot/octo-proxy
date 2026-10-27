@@ -11,6 +11,7 @@ import (
 
 	reuseport "github.com/kavu/go_reuseport"
 	"github.com/nothinux/octo-proxy/pkg/config"
+	"github.com/nothinux/octo-proxy/pkg/dnswatch"
 	"github.com/nothinux/octo-proxy/pkg/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog/log"
@@ -32,6 +33,9 @@ type Proxy struct {
 	Listener net.Listener
 	Quit     context.CancelFunc
 	Wg       sync.WaitGroup
+	// DNSWatch closes connections to dnsWatch targets whose address left the
+	// DNS answer. It may be nil.
+	DNSWatch *dnswatch.Group
 	sync.Mutex
 }
 
@@ -158,6 +162,16 @@ func (p *Proxy) forwardConn(ctx context.Context, c config.ServerConfig, srcConn 
 
 			p.Wg.Done()
 		}()
+	}
+
+	// Move the connection when its address leaves the DNS answer: closing both
+	// sides makes the client reconnect, and the new dial follows the answer.
+	if tConf.DNSWatch {
+		unregister := p.DNSWatch.Register(tConf.Host, remoteIP(targetConn[0]), func() {
+			srcConn.Close()
+			closeConn(targetConn)
+		})
+		defer unregister()
 	}
 
 	defer srcConn.Close()
