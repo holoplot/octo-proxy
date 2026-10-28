@@ -167,10 +167,18 @@ func (p *Proxy) forwardConn(ctx context.Context, c config.ServerConfig, srcConn 
 
 	// Close long-lived connections to targets that have no timeout configured forcefully on shutdown.
 	if timeoutIsZero(tConf) {
+		// Also return when the connection ends, or every connection leaks a
+		// goroutine until shutdown.
+		done := make(chan struct{})
+		defer close(done)
+
 		p.Wg.Add(1)
 		go func() {
-			<-ctx.Done()
-			closeConn(targetConn)
+			select {
+			case <-ctx.Done():
+				closeConn(targetConn)
+			case <-done:
+			}
 
 			p.Wg.Done()
 		}()
