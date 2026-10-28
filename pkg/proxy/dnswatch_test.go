@@ -35,10 +35,16 @@ func (a *switchableAnswer) lookupIPAddr(ctx context.Context, host string) ([]net
 	return ipAddrs(a.get()...), nil
 }
 
-func (a *switchableAnswer) lookupIP(ctx context.Context, host string) ([]net.IP, error) {
+func (a *switchableAnswer) lookupIP(ctx context.Context, network, host string) ([]net.IP, error) {
 	var ips []net.IP
-	for _, ip := range a.get() {
-		ips = append(ips, net.ParseIP(ip))
+	for _, s := range a.get() {
+		ip := net.ParseIP(s)
+		if (ip.To4() != nil) == (network == "ip4") {
+			ips = append(ips, ip)
+		}
+	}
+	if len(ips) == 0 {
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
 	}
 	return ips, nil
 }
@@ -117,15 +123,19 @@ type dnsWatchSetup struct {
 	group    *dnswatch.Group
 }
 
-func startDNSWatchProxy(t *testing.T, watch bool) *dnsWatchSetup {
+// startDNSWatchProxy starts an echo backend on each of ips, all on one port,
+// and a proxy to controller.test, which first resolves to ips[0].
+func startDNSWatchProxy(t *testing.T, watch bool, ips ...string) *dnsWatchSetup {
 	t.Helper()
 
-	old := echoBackend(t, "127.0.0.1:0")
+	old := echoBackend(t, net.JoinHostPort(ips[0], "0"))
 	_, port, _ := net.SplitHostPort(old.Addr().String())
-	echoBackend(t, net.JoinHostPort("127.0.0.2", port))
+	for _, ip := range ips[1:] {
+		echoBackend(t, net.JoinHostPort(ip, port))
+	}
 
 	answer := &switchableAnswer{}
-	answer.set("127.0.0.1")
+	answer.set(ips[0])
 	withLookup(t, answer.lookupIPAddr)
 
 	listenPort := freePort(t)
@@ -163,7 +173,7 @@ func startDNSWatchProxy(t *testing.T, watch bool) *dnsWatchSetup {
 }
 
 func TestDNSWatchMovesConnectionToNewAnswer(t *testing.T) {
-	s := startDNSWatchProxy(t, true)
+	s := startDNSWatchProxy(t, true, "127.0.0.1", "127.0.0.2")
 
 	c, err := net.Dial("tcp", s.listener)
 	if err != nil {
@@ -198,7 +208,7 @@ func TestDNSWatchMovesConnectionToNewAnswer(t *testing.T) {
 }
 
 func TestDNSWatchIgnoresTargetsWithoutFlag(t *testing.T) {
-	s := startDNSWatchProxy(t, false)
+	s := startDNSWatchProxy(t, false, "127.0.0.1", "127.0.0.2")
 
 	c, err := net.Dial("tcp", s.listener)
 	if err != nil {
@@ -212,5 +222,40 @@ func TestDNSWatchIgnoresTargetsWithoutFlag(t *testing.T) {
 
 	if waitClosed(c, 300*time.Millisecond) {
 		t.Error("closed a connection to a target without dnsWatch")
+	}
+}
+
+func TestDNSWatchMovesIPv6ConnectionWhenAAAAGoes(t *testing.T) {
+	s := startDNSWatchProxy(t, true, "::1", "127.0.0.1")
+
+	c, err := net.Dial("tcp", s.listener)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	roundTrip(t, c)
+
+	if waitClosed(c, 100*time.Millisecond) {
+		t.Fatal("connection closed while its address was still in the answer")
+	}
+
+	// Switched to IPv4-only backends.
+	s.answer.set("127.0.0.1")
+
+	if !waitClosed(c, time.Second) {
+		t.Fatal("IPv6 connection not closed after the name lost its AAAA records")
+	}
+
+	c2, err := net.Dial("tcp", s.listener)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+
+	roundTrip(t, c2)
+
+	if waitClosed(c2, 200*time.Millisecond) {
+		t.Error("reconnected connection was closed, want it on the IPv4 address")
 	}
 }

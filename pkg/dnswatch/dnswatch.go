@@ -1,14 +1,17 @@
 // Package dnswatch moves connections off addresses that have left a
 // hostname's DNS answer.
 //
-// One watcher polls each hostname through the local resolver. Proxies register
-// every connection they dial to a watched hostname. When a successful,
-// non-empty answer no longer contains a connection's address, the connection
-// is closed so that the client reconnects to an address that is in the answer.
+// One watcher polls each hostname's A and AAAA records through the local
+// resolver. Proxies register every connection they dial to a watched hostname.
+// When the answer for a connection's address family no longer contains its
+// address, the connection is closed so that the client reconnects to an
+// address that is in the answer.
 package dnswatch
 
 import (
 	"context"
+	"errors"
+	"maps"
 	"net"
 	"slices"
 	"sync"
@@ -25,17 +28,13 @@ var (
 	resolveErrors = metrics.AddCounterVec("octo_dnswatch_resolve_error", "total failed or empty lookups of the watched hostname")
 )
 
-// LookupFunc returns the IPv4 addresses of host.
-type LookupFunc func(ctx context.Context, host string) ([]net.IP, error)
+// LookupFunc returns the addresses of host for network "ip4" or "ip6", like
+// net.Resolver.LookupIP.
+type LookupFunc func(ctx context.Context, network, host string) ([]net.IP, error)
 
 // lookupTimeout bounds one lookup. It doesn't depend on the interval, so that
 // a short interval on a slow resolver still gets answers.
 const lookupTimeout = 5 * time.Second
-
-// lookupIPv4 asks the local resolver for the hostname's IPv4 addresses.
-func lookupIPv4(ctx context.Context, host string) ([]net.IP, error) {
-	return net.DefaultResolver.LookupIP(ctx, "ip4", host)
-}
 
 // Group holds one watcher per watched hostname. A nil Group watches nothing.
 type Group struct {
@@ -51,15 +50,18 @@ type watcher struct {
 	// lookupCNAME is only used for logging; nil skips it.
 	lookupCNAME func(ctx context.Context, host string) (string, error)
 
-	mu      sync.Mutex
-	conns   map[uint64]*conn
-	nextID  uint64
-	answer  []string
-	failing bool
+	mu     sync.Mutex
+	conns  map[uint64]*conn
+	nextID uint64
+	// answer holds the last known answer per family.
+	answer map[string][]string
+	// failing marks the families whose last lookup failed.
+	failing map[string]bool
 }
 
 type conn struct {
 	ip     string
+	family string
 	close  func()
 	closed bool
 }
@@ -71,7 +73,7 @@ func New(interval time.Duration, hosts []string, lookup LookupFunc) *Group {
 		return newGroup(interval, hosts, lookup)
 	}
 
-	g := newGroup(interval, hosts, lookupIPv4)
+	g := newGroup(interval, hosts, net.DefaultResolver.LookupIP)
 
 	for _, w := range g.watchers {
 		w.lookupCNAME = net.DefaultResolver.LookupCNAME
@@ -88,9 +90,10 @@ func newGroup(interval time.Duration, hosts []string, lookup LookupFunc) *Group 
 
 	for _, h := range hosts {
 		g.watchers[h] = &watcher{
-			host:   h,
-			lookup: lookup,
-			conns:  make(map[uint64]*conn),
+			host:    h,
+			lookup:  lookup,
+			conns:   make(map[uint64]*conn),
+			failing: make(map[string]bool),
 		}
 	}
 
@@ -101,22 +104,21 @@ func newGroup(interval time.Duration, hosts []string, lookup LookupFunc) *Group 
 // called at most once, when ip leaves the answer. The returned function must
 // be called when the connection ends.
 //
-// Connections to hosts that are not watched, and IPv6 connections, are not
-// tracked: the watcher only queries IPv4 addresses.
+// Connections to hosts that are not watched are not tracked.
 func (g *Group) Register(host string, ip net.IP, closeFn func()) (unregister func()) {
-	if g == nil {
+	if g == nil || ip == nil {
 		return func() {}
 	}
 
 	w, ok := g.watchers[host]
-	if !ok || ip.To4() == nil {
+	if !ok {
 		return func() {}
 	}
 
 	w.mu.Lock()
 	id := w.nextID
 	w.nextID++
-	w.conns[id] = &conn{ip: ip.String(), close: closeFn}
+	w.conns[id] = &conn{ip: ip.String(), family: family(ip), close: closeFn}
 	w.mu.Unlock()
 
 	return func() {
@@ -168,57 +170,111 @@ func (g *Group) Stop() {
 	g.wg.Wait()
 }
 
-// poll looks up the host once and closes every connection whose address is
-// not in a successful, non-empty answer. It re-checks all connections on every
-// poll, so a dial that raced a change is caught on the next one.
-func (w *watcher) poll(ctx context.Context) {
-	lctx, cancel := context.WithTimeout(ctx, lookupTimeout)
-	ips, err := w.lookup(lctx, w.host)
-	cancel()
+// families are the address families the watcher looks up, each on its own:
+// Go's combined lookup returns one family without an error when the other
+// fails, which would look as if all addresses of the failed family had left.
+var families = []string{"ip4", "ip6"}
 
-	// Stopped during the lookup: that isn't a failed lookup.
-	if ctx.Err() != nil {
-		return
+func family(ip net.IP) string {
+	if ip.To4() != nil {
+		return "ip4"
 	}
 
-	if err != nil || len(ips) == 0 {
-		resolveErrors.With(prometheus.Labels{"name": w.host}).Inc()
+	return "ip6"
+}
 
-		w.mu.Lock()
-		wasFailing := w.failing
-		w.failing = true
-		w.mu.Unlock()
+type familyResult struct {
+	addrs []string
+	err   error
+}
 
-		// Log only the transition: a name that never resolves fails every poll.
-		if !wasFailing {
-			log.Warn().
-				Err(err).
-				Str("host", w.host).
-				Msg("DNS watch lookup failed or returned no addresses, keeping connections")
+func (r familyResult) notFound() bool {
+	var dnsErr *net.DNSError
+	return errors.As(r.err, &dnsErr) && dnsErr.IsNotFound
+}
+
+// poll looks up the host once per family and closes every connection whose
+// address is not in its family's answer. A family's answer counts only when
+// its lookup succeeded, or when it has no records while the other family has
+// addresses. It re-checks all connections on every poll, so a dial that raced
+// a change is caught on the next one.
+func (w *watcher) poll(ctx context.Context) {
+	results := make(map[string]familyResult, len(families))
+	anyAddrs := false
+
+	for _, f := range families {
+		lctx, cancel := context.WithTimeout(ctx, lookupTimeout)
+		ips, err := w.lookup(lctx, f, w.host)
+		cancel()
+
+		// Stopped during the lookup: that isn't a failed lookup.
+		if ctx.Err() != nil {
+			return
 		}
 
-		return
+		r := familyResult{err: err}
+		for _, ip := range ips {
+			r.addrs = append(r.addrs, ip.String())
+		}
+		slices.Sort(r.addrs)
+		r.addrs = slices.Compact(r.addrs)
+
+		if err == nil && len(r.addrs) == 0 {
+			r.err = &net.DNSError{Err: "no addresses", Name: w.host, IsNotFound: true}
+		}
+
+		results[f] = r
+		anyAddrs = anyAddrs || len(r.addrs) > 0
 	}
 
-	answer := make([]string, 0, len(ips))
-	for _, ip := range ips {
-		answer = append(answer, ip.String())
+	// answers holds the families whose answer is known in this poll.
+	answers := make(map[string][]string, len(families))
+	failed := make(map[string]error, len(families))
+
+	for f, r := range results {
+		switch {
+		case r.err == nil:
+			answers[f] = r.addrs
+		case anyAddrs && r.notFound():
+			// The name exists but has no records of this family.
+			answers[f] = []string{}
+		default:
+			failed[f] = r.err
+		}
 	}
-	slices.Sort(answer)
-	answer = slices.Compact(answer)
 
 	var toClose []*conn
 
 	w.mu.Lock()
 
-	changed := !slices.Equal(answer, w.answer)
+	changed := false
 	first := w.answer == nil
-	recovered := w.failing
-	w.answer = answer
-	w.failing = false
+	if first {
+		w.answer = make(map[string][]string, len(families))
+	}
+
+	for f, a := range answers {
+		if old, ok := w.answer[f]; !ok || !slices.Equal(old, a) {
+			changed = true
+		}
+		w.answer[f] = a
+	}
+
+	var newlyFailed, recovered []string
+	for _, f := range families {
+		_, isFailing := failed[f]
+		if isFailing && !w.failing[f] {
+			newlyFailed = append(newlyFailed, f)
+		}
+		if !isFailing && w.failing[f] {
+			recovered = append(recovered, f)
+		}
+		w.failing[f] = isFailing
+	}
 
 	for _, c := range w.conns {
-		if !c.closed && !slices.Contains(answer, c.ip) {
+		a, known := answers[c.family]
+		if known && !c.closed && !slices.Contains(a, c.ip) {
 			c.closed = true
 			toClose = append(toClose, c)
 		}
@@ -237,15 +293,32 @@ func (w *watcher) poll(ctx context.Context) {
 		c.close()
 	}
 
+	for _, f := range families {
+		if err, ok := failed[f]; ok {
+			resolveErrors.With(prometheus.Labels{"name": w.host}).Inc()
+
+			// Log only the transition: a name that never resolves fails every poll.
+			if slices.Contains(newlyFailed, f) {
+				log.Warn().
+					Err(err).
+					Str("host", w.host).
+					Str("family", f).
+					Msg("DNS watch lookup failed, keeping this family's connections")
+			}
+		}
+	}
+
 	// Logged after closing, so the CNAME lookup doesn't delay the move.
-	if changed || recovered {
+	if (changed || len(recovered) > 0) && len(answers) > 0 {
 		if changed && !first {
 			answerChanges.With(prometheus.Labels{"name": w.host}).Inc()
 		}
 
 		log.Info().
 			Str("host", w.host).
-			Strs("addresses", answer).
+			Strs("ipv4", answers["ip4"]).
+			Strs("ipv6", answers["ip6"]).
+			Strs("failed", slices.Sorted(maps.Keys(failed))).
 			Str("cname", w.cname(ctx)).
 			Bool("changed", changed && !first).
 			Msg("DNS watch answer")

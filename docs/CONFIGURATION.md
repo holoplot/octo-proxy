@@ -67,11 +67,13 @@ At least one of `ipv4` or `ipv6` needs to be set to `true`.
 | interval | `<string>`    | How often to look up each watched hostname, as a duration such as `5s`. Default 5 seconds | no       |
 
 ## DNS watch
-For every hostname that a target with `dnsWatch: true` names, octo-proxy runs one watcher, shared by all servers. Every `interval` it asks the local resolver for the hostname's IPv4 addresses. When a successful, non-empty answer no longer contains the address of a connection to that target, octo-proxy closes both sides of that connection right away, and the client's reconnect is dialled to an address from the current answer.
+For every hostname that a target with `dnsWatch: true` names, octo-proxy runs one watcher, shared by all servers. Every `interval` it asks the local resolver for the hostname's IPv4 (A) and IPv6 (AAAA) addresses, in two separate lookups. When the answer for a connection's address family no longer contains its address, octo-proxy closes both sides of that connection right away, and the client's reconnect is dialled to an address from the current answer.
 
 - Polling the local resolver is cheap: a caching resolver such as systemd-resolved answers from its cache until the record's TTL expires, so a change is seen at most one `interval` after the TTL runs out.
-- Failed lookups, NXDOMAIN and empty answers close nothing.
-- Connections from `mdnsTarget`, IP-literal targets and IPv6 connections are never closed by the watcher.
+- Each family is judged on its own. A failed lookup (timeout, SERVFAIL) keeps that family's connections, even when the other family's lookup succeeds.
+- A family with no records while the other family has addresses counts as an empty answer, so all connections of that family move (for example after a switch to IPv4-only backends).
+- NXDOMAIN, or no addresses in either family, closes nothing.
+- Connections from `mdnsTarget` and IP-literal targets are never closed by the watcher.
 
 ```yaml
 dnsWatch:

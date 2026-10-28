@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,43 +16,75 @@ import (
 
 const host = "controller.test"
 
-// fakeResolver serves a settable answer for host.
+// fakeResolver serves a settable answer for host. Like Go's resolver, a
+// family without records returns "not found".
 type fakeResolver struct {
-	mu      sync.Mutex
-	ips     []net.IP
-	err     error
-	lookups atomic.Int32
+	mu       sync.Mutex
+	ips      []net.IP
+	errs     map[string]error
+	lookups  atomic.Int32
+	networks []string
 }
 
 func (r *fakeResolver) set(ips ...string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.err = nil
+	r.errs = nil
 	r.ips = nil
 	for _, ip := range ips {
 		r.ips = append(r.ips, net.ParseIP(ip))
 	}
 }
 
+// fail makes lookups of both families fail with err.
 func (r *fakeResolver) fail(err error) {
+	r.failFamily("ip4", err)
+	r.failFamily("ip6", err)
+}
+
+func (r *fakeResolver) failFamily(network string, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.err = err
+	if r.errs == nil {
+		r.errs = make(map[string]error)
+	}
+	r.errs[network] = err
 }
 
-func (r *fakeResolver) lookup(ctx context.Context, h string) ([]net.IP, error) {
+func notFound(h string) error {
+	return &net.DNSError{Err: "no such host", Name: h, IsNotFound: true}
+}
+
+func (r *fakeResolver) lookup(ctx context.Context, network, h string) ([]net.IP, error) {
 	r.lookups.Add(1)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	r.networks = append(r.networks, network)
+
 	if h != host {
-		return nil, &net.DNSError{Err: "no such host", Name: h, IsNotFound: true}
+		return nil, notFound(h)
 	}
 
-	return r.ips, r.err
+	if err := r.errs[network]; err != nil {
+		return nil, err
+	}
+
+	var ips []net.IP
+	for _, ip := range r.ips {
+		if (ip.To4() != nil) == (network == "ip4") {
+			ips = append(ips, ip)
+		}
+	}
+
+	if len(ips) == 0 {
+		return nil, notFound(h)
+	}
+
+	return ips, nil
 }
 
 // testConn counts how often its close function runs.
@@ -208,17 +241,101 @@ func TestUnwatchedHostIsIgnored(t *testing.T) {
 	}
 }
 
-func TestIPv6ConnectionsAreNotWatched(t *testing.T) {
+func TestLooksUpBothFamiliesSeparately(t *testing.T) {
 	r := &fakeResolver{}
-	r.set("10.0.0.1")
+	r.set("10.0.0.1", "fd00::1")
 	g := newTestGroup(r)
-
-	a := register(g, "fd00::1")
 
 	g.pollAll(context.Background())
 
-	if a.closed() {
-		t.Error("closed an IPv6 connection, but the watcher only queries IPv4")
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if len(r.networks) != 2 || !slices.Contains(r.networks, "ip4") || !slices.Contains(r.networks, "ip6") {
+		t.Errorf("looked up %v, want ip4 and ip6 once each", r.networks)
+	}
+}
+
+func TestIPv6AddressLeavingAnswerClosesOnlyIPv6Connections(t *testing.T) {
+	r := &fakeResolver{}
+	r.set("10.0.0.1", "fd00::1")
+	g := newTestGroup(r)
+
+	v4 := register(g, "10.0.0.1")
+	v6 := register(g, "fd00::1")
+
+	g.pollAll(context.Background())
+
+	if v4.closed() || v6.closed() {
+		t.Fatal("closed a connection whose address is still in the answer")
+	}
+
+	r.set("10.0.0.1", "fd00::2")
+	g.pollAll(context.Background())
+
+	if !v6.closed() {
+		t.Error("IPv6 connection not closed after its address left the AAAA answer")
+	}
+
+	if v4.closed() {
+		t.Error("IPv4 connection closed, but its address is still in the A answer")
+	}
+}
+
+func TestFamilyLookupErrorKeepsThatFamily(t *testing.T) {
+	tests := []struct {
+		name      string
+		failing   string
+		kept      string
+		moved     string
+		newAnswer []string
+	}{
+		{"AAAA error", "ip6", "fd00::1", "10.0.0.1", []string{"10.0.0.2", "fd00::2"}},
+		{"A error", "ip4", "10.0.0.1", "fd00::1", []string{"10.0.0.2", "fd00::2"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &fakeResolver{}
+			r.set("10.0.0.1", "fd00::1")
+			g := newTestGroup(r)
+
+			kept := register(g, tt.kept)
+			moved := register(g, tt.moved)
+
+			r.set(tt.newAnswer...)
+			r.failFamily(tt.failing, errors.New("timeout"))
+			g.pollAll(context.Background())
+
+			if kept.closed() {
+				t.Errorf("closed %s although its family's lookup failed", tt.kept)
+			}
+
+			if !moved.closed() {
+				t.Errorf("%s not closed although its family's answer no longer has it", tt.moved)
+			}
+		})
+	}
+}
+
+func TestNoAAAARecordsMovesIPv6Connections(t *testing.T) {
+	r := &fakeResolver{}
+	r.set("10.0.0.1", "fd00::1")
+	g := newTestGroup(r)
+
+	v4 := register(g, "10.0.0.1")
+	v6 := register(g, "fd00::1")
+
+	// Switched to IPv4-only backends: the name exists, AAAA has no records.
+	r.set("10.0.0.1")
+	g.pollAll(context.Background())
+
+	if !v6.closed() {
+		t.Error("IPv6 connection not closed although the name has no AAAA records any more")
+	}
+
+	if v4.closed() {
+		t.Error("IPv4 connection closed, but its address is still in the A answer")
 	}
 }
 
@@ -318,7 +435,7 @@ func TestStopDuringLookupIsNotAnError(t *testing.T) {
 	const stopHost = "stop.test"
 
 	started := make(chan struct{}, 1)
-	lookup := func(ctx context.Context, h string) ([]net.IP, error) {
+	lookup := func(ctx context.Context, network, h string) ([]net.IP, error) {
 		select {
 		case started <- struct{}{}:
 		default:
@@ -341,13 +458,13 @@ func TestLookupSlowerThanIntervalStillWorks(t *testing.T) {
 	r := &fakeResolver{}
 	r.set("10.0.0.2")
 
-	slow := func(ctx context.Context, h string) ([]net.IP, error) {
+	slow := func(ctx context.Context, network, h string) ([]net.IP, error) {
 		select {
 		case <-time.After(30 * time.Millisecond):
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
-		return r.lookup(ctx, h)
+		return r.lookup(ctx, network, h)
 	}
 
 	g := newGroup(10*time.Millisecond, []string{host}, slow)
