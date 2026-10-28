@@ -11,6 +11,7 @@ import (
 
 	reuseport "github.com/kavu/go_reuseport"
 	"github.com/nothinux/octo-proxy/pkg/config"
+	"github.com/nothinux/octo-proxy/pkg/dnswatch"
 	"github.com/nothinux/octo-proxy/pkg/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog/log"
@@ -32,7 +33,13 @@ type Proxy struct {
 	Listener net.Listener
 	Quit     context.CancelFunc
 	Wg       sync.WaitGroup
+	// DNSWatch closes connections to dnsWatch targets whose address left the
+	// DNS answer. It may be nil.
+	DNSWatch *dnswatch.Group
 	sync.Mutex
+	// closed is set by Shutdown so that a Run that starts afterwards
+	// doesn't serve.
+	closed bool
 }
 
 // New initialize new proxy
@@ -45,6 +52,11 @@ func New(name string) *Proxy {
 // Run initialize tcp or tls listener
 func (p *Proxy) Run(c config.ServerConfig) {
 	p.Lock()
+	if p.closed {
+		p.Unlock()
+		return
+	}
+
 	if p.Quit != nil {
 		p.Quit()
 	}
@@ -79,20 +91,24 @@ func (p *Proxy) Run(c config.ServerConfig) {
 			log.Fatal().Err(err).Msg("failed to get TLS config")
 		}
 
-		tlsListen := tls.NewListener(l, tlsConf.Config)
-		p.Lock()
-		p.Listener = tlsListen
-		p.Unlock()
+		l = tls.NewListener(l, tlsConf.Config)
 
 		log.Info().
 			Str("name", c.Name).
 			Str("mode", c.Listener.TLSConfig.Mode).
 			Msg("running in TLS mode")
-	} else {
-		p.Lock()
-		p.Listener = l
-		p.Unlock()
 	}
+
+	// Shutdown may have run while the listener was being set up, and then
+	// had no listener to close.
+	p.Lock()
+	if p.closed {
+		p.Unlock()
+		l.Close()
+		return
+	}
+	p.Listener = l
+	p.Unlock()
 
 	p.handleConn(ctx, c)
 }
@@ -151,13 +167,31 @@ func (p *Proxy) forwardConn(ctx context.Context, c config.ServerConfig, srcConn 
 
 	// Close long-lived connections to targets that have no timeout configured forcefully on shutdown.
 	if timeoutIsZero(tConf) {
+		// Also return when the connection ends, or every connection leaks a
+		// goroutine until shutdown.
+		done := make(chan struct{})
+		defer close(done)
+
 		p.Wg.Add(1)
 		go func() {
-			<-ctx.Done()
-			closeConn(targetConn)
+			select {
+			case <-ctx.Done():
+				closeConn(targetConn)
+			case <-done:
+			}
 
 			p.Wg.Done()
 		}()
+	}
+
+	// Move the connection when its address leaves the DNS answer: closing both
+	// sides makes the client reconnect, and the new dial follows the answer.
+	if tConf.DNSWatch {
+		unregister := p.DNSWatch.Register(tConf.Host, remoteIP(targetConn[0]), func() {
+			srcConn.Close()
+			closeConn(targetConn)
+		})
+		defer unregister()
 	}
 
 	defer srcConn.Close()
@@ -184,6 +218,7 @@ func (p *Proxy) forwardConn(ctx context.Context, c config.ServerConfig, srcConn 
 
 func (p *Proxy) Shutdown() {
 	p.Lock()
+	p.closed = true
 	if p.Quit != nil {
 		p.Quit()
 		p.Quit = nil
@@ -191,6 +226,9 @@ func (p *Proxy) Shutdown() {
 	if p.Listener != nil {
 		p.Listener.Close()
 	}
-	p.Wg.Wait()
 	p.Unlock()
+
+	// Wait without the lock: a Run that hasn't started yet needs it to see
+	// that the proxy is closed.
+	p.Wg.Wait()
 }

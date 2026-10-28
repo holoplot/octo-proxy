@@ -32,6 +32,9 @@ func newDial(timeout time.Duration) *net.Dialer {
 	}
 }
 
+// lookupIPAddr resolves hostname targets. Tests replace it.
+var lookupIPAddr = net.DefaultResolver.LookupIPAddr
+
 func dialTarget(ctx context.Context, hc config.HostConfig) (net.Conn, error) {
 	d := newDial(hc.ConnectTimeoutDuration)
 
@@ -46,10 +49,167 @@ func dialTarget(ctx context.Context, hc config.HostConfig) (net.Conn, error) {
 			Str("port", hc.Port).
 			Msg("called tls target")
 
-		return tls.DialWithDialer(d, "tcp", net.JoinHostPort(hc.Host, hc.Port), tlsConf.Config)
+		if !isHostname(hc.Host) {
+			return tls.DialWithDialer(d, "tcp", net.JoinHostPort(hc.Host, hc.Port), tlsConf.Config)
+		}
+
+		c, err := dialHostname(ctx, d, hc)
+		if err != nil {
+			return nil, err
+		}
+
+		tlsConf.ServerName = hc.Host
+		tc := tls.Client(c, tlsConf.Config)
+
+		hctx, cancel := withOptionalTimeout(ctx, hc.ConnectTimeoutDuration)
+		defer cancel()
+
+		if err := tc.HandshakeContext(hctx); err != nil {
+			c.Close()
+			return nil, err
+		}
+
+		return tc, nil
+	}
+
+	if isHostname(hc.Host) {
+		return dialHostname(ctx, d, hc)
 	}
 
 	return d.DialContext(ctx, "tcp", net.JoinHostPort(hc.Host, hc.Port))
+}
+
+func isHostname(host string) bool {
+	return net.ParseIP(host) == nil
+}
+
+func withOptionalTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout > 0 {
+		return context.WithTimeout(ctx, timeout)
+	}
+
+	return context.WithCancel(ctx)
+}
+
+// dialHostname resolves the target's hostname and dials its addresses in
+// random order, so that connections spread over all of them whatever order
+// the resolver returns.
+func dialHostname(ctx context.Context, d *net.Dialer, hc config.HostConfig) (net.Conn, error) {
+	lctx, cancel := withOptionalTimeout(ctx, hc.ConnectTimeoutDuration)
+	addrs, err := lookupIPAddr(lctx, hc.Host)
+	cancel()
+
+	if err != nil {
+		return nil, err
+	}
+
+	if len(addrs) == 0 {
+		return nil, &net.DNSError{Err: "no addresses", Name: hc.Host, IsNotFound: true}
+	}
+
+	targets := make([]string, 0, len(addrs))
+	for _, a := range shuffleAddrs(addrs) {
+		targets = append(targets, net.JoinHostPort(a.String(), hc.Port))
+	}
+
+	return dialStaggered(ctx, targets, hc.DialStaggerDuration, d.DialContext)
+}
+
+// shuffleAddrs returns addrs in random order within each address family. The
+// family of the first address, which the resolver prefers, stays first.
+func shuffleAddrs(addrs []net.IPAddr) []net.IPAddr {
+	var primaries, fallbacks []net.IPAddr
+
+	for _, a := range addrs {
+		if len(primaries) == 0 || (a.IP.To4() != nil) == (primaries[0].IP.To4() != nil) {
+			primaries = append(primaries, a)
+		} else {
+			fallbacks = append(fallbacks, a)
+		}
+	}
+
+	rand.Shuffle(len(primaries), func(i, j int) {
+		primaries[i], primaries[j] = primaries[j], primaries[i]
+	})
+
+	rand.Shuffle(len(fallbacks), func(i, j int) {
+		fallbacks[i], fallbacks[j] = fallbacks[j], fallbacks[i]
+	})
+
+	return append(primaries, fallbacks...)
+}
+
+// dialStaggered dials addrs in order. The next attempt starts when the
+// previous one fails or after stagger, whichever comes first, and earlier
+// attempts keep running (Happy Eyeballs, RFC 8305). The first connection wins
+// and all other attempts are cancelled or closed.
+func dialStaggered(ctx context.Context, addrs []string, stagger time.Duration,
+	dial func(ctx context.Context, network, addr string) (net.Conn, error)) (net.Conn, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+
+	results := make(chan result, len(addrs))
+	next, pending := 0, 0
+
+	start := func() {
+		addr := addrs[next]
+		next++
+		pending++
+
+		go func() {
+			c, err := dial(ctx, "tcp", addr)
+			results <- result{conn: c, err: err}
+		}()
+	}
+
+	timer := time.NewTimer(stagger)
+	defer timer.Stop()
+
+	start()
+
+	var firstErr error
+
+	for pending > 0 {
+		select {
+		case r := <-results:
+			pending--
+
+			if r.err == nil {
+				// Attempts that still connect after cancel() lost the race.
+				go func(n int) {
+					for ; n > 0; n-- {
+						if late := <-results; late.conn != nil {
+							late.conn.Close()
+						}
+					}
+				}(pending)
+
+				return r.conn, nil
+			}
+
+			if firstErr == nil {
+				firstErr = r.err
+			}
+
+			if next < len(addrs) {
+				start()
+				timer.Reset(stagger)
+			}
+
+		case <-timer.C:
+			if next < len(addrs) {
+				start()
+				timer.Reset(stagger)
+			}
+		}
+	}
+
+	return nil, firstErr
 }
 
 func dialTargets(ctx context.Context, hcs []config.HostConfig) (net.Conn, config.HostConfig, error) {
