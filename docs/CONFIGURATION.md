@@ -38,12 +38,15 @@ When `host` of a `target` or `mirror` is a hostname, octo-proxy resolves it itse
 
 At least one of `ipv4` or `ipv6` needs to be set to `true`.
 
+When `connection.interface` is set, only that interface is browsed for the service, and connections to it are bound to that interface.
+
 ## connectionConfig
 | Field    | Type          | Description                     | Required |
 | -------- | ------------- | ------------------------------- | -------- |
 | timeout  | `<string>`    | Set timeout or deadline for every connection, you can set in milliseconds with `ms` or seconds `s`. default 300 seconds. A value of 0 will disable deadlines on connections                 | no       |
 | connectTimeout | `<string>` | Timeout for each connection attempt, as a duration such as `5s`. Default 5 seconds | no       |
 | dialStagger | `<string>` | For hostname targets: how long to wait for one address before also trying the next, as a duration such as `250ms`. Default 250 milliseconds. A value of 0 tries all addresses at once | no       |
+| interface | `<string>` | Only on `targets` and `mdnsTarget`, Linux only. Bind outgoing connections to this network interface (`SO_BINDTODEVICE`), so they leave through it whatever the routing table prefers. Needs `CAP_NET_RAW`. The connection fails if the interface does not exist | no       |
 
 ## tlsConfig
 | Field    | Type          | Description                     | Required |

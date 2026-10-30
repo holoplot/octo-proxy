@@ -26,17 +26,23 @@ var (
 	mirrorDialErr   = metrics.AddCounterVecMultiLabels("octo_mirror_dial_error", "total dial error when calling an mirror upstream")
 )
 
-func newDial(timeout time.Duration) *net.Dialer {
-	return &net.Dialer{
+func newDial(timeout time.Duration, iface string) *net.Dialer {
+	d := &net.Dialer{
 		Timeout: timeout,
 	}
+
+	if iface != "" {
+		d.Control = bindToInterface(iface)
+	}
+
+	return d
 }
 
 // lookupIPAddr resolves hostname targets. Tests replace it.
 var lookupIPAddr = net.DefaultResolver.LookupIPAddr
 
 func dialTarget(ctx context.Context, hc config.HostConfig) (net.Conn, error) {
-	d := newDial(hc.ConnectTimeoutDuration)
+	d := newDial(hc.ConnectTimeoutDuration, hc.Interface)
 
 	if hc.IsSimple() || hc.IsMutual() {
 		tlsConf, err := getTLSConfig(hc.TLSConfig)
@@ -263,7 +269,7 @@ func getTargets(c config.ServerConfig) ([]net.Conn, io.Writer, config.HostConfig
 	targets := c.Targets
 
 	if c.MDNSTarget.ServiceName != "" {
-		addrs, err := mdns.ResolveService(c.MDNSTarget.ServiceName, c.MDNSTarget.IPv4, c.MDNSTarget.IPv6)
+		addrs, err := mdns.ResolveService(c.MDNSTarget.ServiceName, c.MDNSTarget.Interface, c.MDNSTarget.IPv4, c.MDNSTarget.IPv6)
 		if err == nil {
 			for _, addr := range addrs {
 				target := config.HostConfig{

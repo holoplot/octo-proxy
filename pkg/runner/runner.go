@@ -194,7 +194,7 @@ func shutdown(proxies map[string]*proxy.Proxy, dnsWatch *dnswatch.Group, m *metr
 
 func trackMDNSServices(c config.ServerConfig) {
 	if c.MDNSTarget.ServiceName != "" {
-		if err := mdns.TrackService(c.MDNSTarget.ServiceName, c.MDNSTarget.IPv4, c.MDNSTarget.IPv6); err != nil {
+		if err := mdns.TrackService(c.MDNSTarget.ServiceName, c.MDNSTarget.Interface, c.MDNSTarget.IPv4, c.MDNSTarget.IPv6); err != nil {
 			log.Error().
 				Err(err).
 				Str("service", c.MDNSTarget.ServiceName).

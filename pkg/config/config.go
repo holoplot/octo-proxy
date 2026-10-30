@@ -68,10 +68,12 @@ type MDNSTargetConfig struct {
 }
 
 type ConnectionConfig struct {
-	ConnectTimeout         string `yaml:"connectTimeout"`
-	Timeout                string `yaml:"timeout"`
-	IdleTimeout            string `yaml:"idleTimeout"` // TODO: Implement idle timeout
-	DialStagger            string `yaml:"dialStagger"`
+	ConnectTimeout string `yaml:"connectTimeout"`
+	Timeout        string `yaml:"timeout"`
+	IdleTimeout    string `yaml:"idleTimeout"` // TODO: Implement idle timeout
+	DialStagger    string `yaml:"dialStagger"`
+	// Interface binds outgoing connections to a network interface, on Linux only.
+	Interface              string `yaml:"interface"`
 	ConnectTimeoutDuration time.Duration
 	TimeoutDuration        time.Duration
 	IdleTimeoutDuration    time.Duration

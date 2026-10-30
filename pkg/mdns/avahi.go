@@ -48,13 +48,39 @@ func makeProto(v4, v6 bool) int32 {
 	return avahi.ProtoUnspec
 }
 
-func (a *avahiResolver) resolveService(name string, v4, v6 bool) ([]net.TCPAddr, error) {
+// trackerKey identifies a tracker. The same service can be tracked on all
+// interfaces (iface "") and on single interfaces at the same time.
+func trackerKey(name, iface string) string {
+	if iface == "" {
+		return name
+	}
+
+	return name + "%" + iface
+}
+
+// browseInterface returns the avahi interface index to browse on.
+func browseInterface(iface string) (int32, error) {
+	if iface == "" {
+		return avahi.InterfaceUnspec, nil
+	}
+
+	i, err := net.InterfaceByName(iface)
+	if err != nil {
+		return 0, fmt.Errorf("interface %s: %w", iface, err)
+	}
+
+	return int32(i.Index), nil
+}
+
+func (a *avahiResolver) resolveService(name, iface string, v4, v6 bool) ([]net.TCPAddr, error) {
+	key := trackerKey(name, iface)
+
 	a.trackerMutex.Lock()
-	tracker, ok := a.tracker[name]
+	tracker, ok := a.tracker[key]
 	a.trackerMutex.Unlock()
 
 	if !ok {
-		return nil, fmt.Errorf("service %s not tracked", name)
+		return nil, fmt.Errorf("service %s not tracked", key)
 	}
 
 	addrs := make([]net.TCPAddr, 0)
@@ -78,7 +104,7 @@ func (a *avahiResolver) resolveService(name string, v4, v6 bool) ([]net.TCPAddr,
 	tracker.mutex.Unlock()
 
 	if len(addrs) == 0 {
-		log.Debug().Str("name", name).Msg("No mDNS addresses found for service")
+		log.Debug().Str("name", key).Msg("No mDNS addresses found for service")
 	} else {
 		s := make([]string, len(addrs))
 
@@ -86,17 +112,19 @@ func (a *avahiResolver) resolveService(name string, v4, v6 bool) ([]net.TCPAddr,
 			s[i] = fmt.Sprintf("%s:%d", addr.IP.String(), addr.Port)
 		}
 
-		log.Debug().Str("name", name).Strs("ips", s).Msg("Resolved mDNS service")
+		log.Debug().Str("name", key).Strs("ips", s).Msg("Resolved mDNS service")
 	}
 
 	return addrs, nil
 }
 
-func (a *avahiResolver) trackService(name string, v4, v6 bool) error {
+func (a *avahiResolver) trackService(name, iface string, v4, v6 bool) error {
 	a.trackerMutex.Lock()
 	defer a.trackerMutex.Unlock()
 
-	if _, ok := a.tracker[name]; ok {
+	key := trackerKey(name, iface)
+
+	if _, ok := a.tracker[key]; ok {
 		return nil
 	}
 
@@ -111,13 +139,16 @@ func (a *avahiResolver) trackService(name string, v4, v6 bool) error {
 	var serviceBrowser *avahi.ServiceBrowser
 
 	makeServiceBrowser := func() error {
-		var err error
+		ifIndex, err := browseInterface(iface)
+		if err != nil {
+			return err
+		}
 
 		if serviceBrowser != nil {
 			a.avahiServer.ServiceBrowserFree(serviceBrowser)
 		}
 
-		serviceBrowser, err = a.avahiServer.ServiceBrowserNew(avahi.InterfaceUnspec, makeProto(v4, v6), name, "local", 0)
+		serviceBrowser, err = a.avahiServer.ServiceBrowserNew(ifIndex, makeProto(v4, v6), name, "local", 0)
 		if err != nil {
 			return fmt.Errorf("avahi.ServiceBrowserNew() failed: %w", err)
 		}
@@ -140,8 +171,8 @@ func (a *avahiResolver) trackService(name string, v4, v6 bool) error {
 			a.trackerMutex.Lock()
 
 			// Only remove ourselves conditionally, in case another tracker was installed meanwhile.
-			if a.tracker[name] == tracker {
-				delete(a.tracker, name)
+			if a.tracker[key] == tracker {
+				delete(a.tracker, key)
 			}
 
 			a.trackerMutex.Unlock()
@@ -240,7 +271,7 @@ func (a *avahiResolver) trackService(name string, v4, v6 bool) error {
 		}
 	}()
 
-	a.tracker[name] = tracker
+	a.tracker[key] = tracker
 
 	return nil
 }
@@ -276,7 +307,9 @@ func newAvahiResolver() (*avahiResolver, error) {
 
 // Public interface
 
-func TrackService(name string, v4, v6 bool) error {
+// TrackService starts tracking an mDNS service. With iface set, only that
+// network interface is browsed.
+func TrackService(name, iface string, v4, v6 bool) error {
 	if resolver == nil {
 		var err error
 
@@ -286,7 +319,7 @@ func TrackService(name string, v4, v6 bool) error {
 		}
 	}
 
-	return resolver.trackService(name, v4, v6)
+	return resolver.trackService(name, iface, v4, v6)
 }
 
 func UntrackServices() {
@@ -295,10 +328,11 @@ func UntrackServices() {
 	}
 }
 
-func ResolveService(name string, v4, v6 bool) ([]net.TCPAddr, error) {
+// ResolveService returns the addresses of a tracked service.
+func ResolveService(name, iface string, v4, v6 bool) ([]net.TCPAddr, error) {
 	if resolver == nil {
 		return nil, fmt.Errorf("no resolver")
 	}
 
-	return resolver.resolveService(name, v4, v6)
+	return resolver.resolveService(name, iface, v4, v6)
 }
